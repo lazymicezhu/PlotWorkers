@@ -55,8 +55,6 @@ const ZONE_META: Record<ZoneType, { name: string; subtitle: string }> = {
   process: { name: "加工区", subtitle: "加工产品" },
   living: { name: "生活区", subtitle: "恢复心情" },
 };
-const tones = ["sage", "mint", "grass", "moss"];
-
 type Panel = "process" | "shop" | "sell" | "plotBuilder" | null;
 type PlotDraft = { plot: PlotState; valid: boolean; original: PlotState };
 type PotionPreview = {
@@ -76,12 +74,8 @@ type AutoTransfer = {
   action: "rest" | "work" | "wake";
 };
 
-const PlotTiles = memo(function PlotTiles({ plot }: { plot: PlotState }) {
-  return <>{Array.from({ length: plot.cols * plot.rows }, (_, index) => {
-    const x = index % plot.cols;
-    const y = Math.floor(index / plot.cols);
-    return <div className={`tile tile-${tileTone(x, y, plot.type)}`} key={`${plot.id}-${x}-${y}`} style={{ "--tile-x": x, "--tile-y": y } as CSSProperties}><span className="tile-top" /><i className="grass-blade blade-one" /><i className="grass-blade blade-two" /></div>;
-  })}</>;
+const PlotSurface = memo(function PlotSurface({ plot }: { plot: PlotState }) {
+  return <img className="plot-surface" src={`/plot-${plot.type}-${plot.cols}.png`} alt="" draggable={false} />;
 }, (previous, next) => previous.plot.id === next.plot.id && previous.plot.cols === next.plot.cols && previous.plot.rows === next.plot.rows && previous.plot.type === next.plot.type);
 
 type WalkerSpriteProps = {
@@ -111,7 +105,7 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
   >
     {hasStatusBadge && <span className={`worker-badge badge-${worker.status}`}>{worker.status === "exhausted" ? "需要休息" : worker.status === "ready" ? "可以工作" : "摸鱼中"}</span>}
     <span className="walker-shadow" />
-    <span className="character"><i className="hair" /><i className="face" /><i className="neck" /><i className="torso" /><i className="arm arm-back" /><i className="arm arm-front" /><i className="leg leg-back"><b className="shoe" /></i><i className="leg leg-front"><b className="shoe" /></i></span>
+    <img className="worker-image" src="/worker.png" alt="" draggable={false} />
   </div>;
 }, (previous, next) =>
   previous.worker.id === next.worker.id &&
@@ -146,11 +140,6 @@ function findPlot(plots: PlotState[], x: number, y: number) {
     const point = unproject(plot, x, y);
     return point.u >= 0 && point.u <= plot.cols && point.v >= 0 && point.v <= plot.rows;
   }) ?? null;
-}
-
-function tileTone(x: number, y: number, type: ZoneType) {
-  const offset = type === "gather" ? 1 : type === "process" ? 2 : 0;
-  return tones[(x * 3 + y * 5 + offset) % tones.length];
 }
 
 function format(value: number) {
@@ -227,6 +216,7 @@ export default function Home() {
   const autoTransfersRef = useRef<AutoTransfer[]>([]);
   const autoCooldownRef = useRef<number[]>([]);
   const autoFinishTimersRef = useRef<number[]>([]);
+  const movementCursorRef = useRef(0);
   const [game, setGame] = useState<GameState>(() => createInitialState(initialPoint.x, initialPoint.y));
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
@@ -320,25 +310,37 @@ export default function Home() {
     const timer = window.setInterval(() => {
       setGame((current) => {
         const plotsById = new Map(current.plots.map((plot) => [plot.id, plot]));
-        const animationBudget = current.workers.length > 300 ? 40 : current.workers.length > 150 ? 70 : 120;
-        const animationChance = Math.min(1, animationBudget / Math.max(1, current.workers.length));
+        const eligible = current.workers.filter((worker) =>
+          worker.id !== draggingIdRef.current &&
+          worker.id !== hoveredWorkerRef.current &&
+          Boolean(worker.zoneId) &&
+          worker.status !== "dragging" &&
+          worker.status !== "exhausted"
+        );
+        if (!eligible.length) return current;
+        const batchSize = current.workers.length > 300 ? 12 : current.workers.length > 150 ? 10 : 8;
+        const start = movementCursorRef.current % eligible.length;
+        const movingIds = new Set<string>();
+        for (let index = 0; index < Math.min(batchSize, eligible.length); index += 1) {
+          movingIds.add(eligible[(start + index) % eligible.length].id);
+        }
+        movementCursorRef.current = (start + batchSize) % eligible.length;
         return {
           ...current,
           workers: current.workers.map((worker) => {
-          if (worker.id === draggingIdRef.current || worker.id === hoveredWorkerRef.current || !worker.zoneId || worker.status === "dragging" || worker.status === "exhausted") return worker;
+          if (!movingIds.has(worker.id) || !worker.zoneId) return worker;
           const plot = plotsById.get(worker.zoneId);
           if (!plot) return worker;
-          if (Math.random() > animationChance * .6) return worker;
           const u = .55 + Math.random() * (plot.cols - 1.1);
           const v = .55 + Math.random() * (plot.rows - 1.1);
           const next = project(plot, u, v);
           const speed = Math.random();
-          const duration = speed < .25 ? 1500 : speed < .65 ? 4800 : 3200;
+          const duration = speed < .2 ? 2400 : speed < .72 ? 5200 : 3600;
           return { ...worker, u, v, ...next, duration, facing: next.x < worker.x ? "left" : "right" };
           }),
         };
       });
-    }, 3200);
+    }, 1200);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -373,7 +375,8 @@ export default function Home() {
     const plot = worker ? displayPlots.find((item) => item.id === worker.zoneId) : null;
     if (!worker) return;
     const position = plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y };
-    setCamera({ x: (WORLD_W / 2 - position.x) * zoom, y: (WORLD_H / 2 - position.y) * zoom });
+    const next = { x: (WORLD_W / 2 - position.x) * zoom, y: (WORLD_H / 2 - position.y) * zoom };
+    setCamera((current) => current.x === next.x && current.y === next.y ? current : next);
   }, [trackedId, draggingId, panning, game.workers, displayPlots, zoom]);
 
   useEffect(() => () => dragCleanupRef.current?.(), []);
@@ -886,7 +889,7 @@ export default function Home() {
           >
             <div className="plot-shadow" />
             <div className="plot-base" aria-hidden="true"><span className="base-left" /><span className="base-right" /></div>
-            <PlotTiles plot={plot} />
+            <PlotSurface plot={plot} />
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，长按移动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
             <div className="zone-sign"><strong>{plot.name}</strong><span>{plot.cols}×{plot.rows} · {count}/{plotCapacity(plot)}人</span></div>
