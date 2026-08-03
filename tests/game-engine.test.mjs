@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyRebirth,
+  buyAutoCanSupply,
   buyCanOpener,
   buyScheduler,
   buySchedulerBot,
@@ -89,6 +90,23 @@ test("living area consumes cans only for actual recovery", () => {
   assert.equal(next.workers[0].mood, 100);
   assert.equal(next.inventory.cans, 19.995);
   assert.equal(next.workers[0].status, "ready");
+});
+
+test("automatic can supply unlocks once and buys paid refills below 20 cans", () => {
+  const game = state();
+  game.coins = 5200;
+  const unlocked = buyAutoCanSupply(game);
+  assert.equal(unlocked.coins, 200);
+  assert.equal(unlocked.autoCanSupply, true);
+  assert.equal(buyAutoCanSupply(unlocked), unlocked);
+  unlocked.inventory.cans = 19;
+  const refilled = stepGame(unlocked, 1, () => 1);
+  assert.equal(refilled.inventory.cans, 69);
+  assert.equal(refilled.coins, 100);
+  const poor = { ...refilled, coins: 99, inventory: { ...refilled.inventory, cans: 10 } };
+  const unchanged = stepGame(poor, 1, () => 1);
+  assert.equal(unchanged.inventory.cans, 10);
+  assert.equal(unchanged.coins, 99);
 });
 
 test("processing reserves raw and advances the current plot batch", () => {
@@ -325,12 +343,13 @@ test("version one saves migrate plots, potions and movement state", async () => 
   delete old.schedulerRobots;
   delete old.canOpenerSeconds;
   delete old.canOpenerCooldown;
+  delete old.autoCanSupply;
   old.recipe = "refined";
   old.recipeProduced = 6;
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
   assert.equal(migrated.plots.length, 3);
   assert.equal(migrated.inventory.potions, 0);
   assert.equal("motion" in migrated.workers[0], false);
@@ -338,6 +357,7 @@ test("version one saves migrate plots, potions and movement state", async () => 
   assert.deepEqual(migrated.schedulerRobots, [{ efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } }]);
   assert.equal(migrated.canOpenerSeconds, 0);
   assert.equal(migrated.canOpenerCooldown, 0);
+  assert.equal(migrated.autoCanSupply, false);
   assert.deepEqual(migrated.processPlots.process, {
     recipe: "refined",
     produced: 6,

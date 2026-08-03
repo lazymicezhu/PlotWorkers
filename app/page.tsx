@@ -25,6 +25,7 @@ import {
   ZoneId,
   ZoneType,
   applyRebirth,
+  buyAutoCanSupply,
   buyCanOpener,
   buyCans,
   buyPlot,
@@ -54,6 +55,7 @@ const CUBE_DEPTH = 38;
 const WORLD_W = 2000;
 const WORLD_H = 1080;
 const SAVE_KEY = "green-realm-save-v1";
+const CAN_PURCHASE_AMOUNTS = [1, 10, 50, 200] as const;
 const ZONE_META: Record<ZoneType, { name: string; subtitle: string }> = {
   gather: { name: "采集区", subtitle: "产出原料" },
   process: { name: "加工区", subtitle: "加工产品" },
@@ -256,6 +258,7 @@ export default function Home() {
   const [autoTransfers, setAutoTransfers] = useState<AutoTransfer[]>([]);
   const [potionDrag, setPotionDrag] = useState<{ x: number; y: number } | null>(null);
   const [potionPreview, setPotionPreview] = useState<PotionPreview | null>(null);
+  const [canPurchaseIndex, setCanPurchaseIndex] = useState(1);
 
   const selectedWorker = useMemo(() => game.workers.find((worker) => worker.id === selectedId) ?? null, [game.workers, selectedId]);
   const displayPlots = useMemo(() => game.plots.map((plot) => plotDraft?.plot.id === plot.id ? plotDraft.plot : plot), [game.plots, plotDraft]);
@@ -977,7 +980,7 @@ export default function Home() {
       {panel && <aside className={`floating-panel ${panel === "shop" ? "shop-panel" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
         <button className="panel-close" onClick={() => { setPanel(null); cancelPurchasedPlot(); }} aria-label="关闭">×</button>
         {panel === "process" && selectedProcessPlot && selectedProcessState && <><h2>{selectedProcessPlot.name}配方</h2><p className="panel-note">这里只统计当前地块。切换配方会退回该地块批次原料，并重置该地块的生产数量。</p>{(["rough", "refined"] as const).map((recipeId) => { const recipe = RECIPES[recipeId]; return <button className={`panel-option ${selectedProcessState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeRecipe(current, selectedProcessPlot.id, recipeId))}><strong>{recipe.name}</strong><span>{recipe.raw} 原料 · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{RECIPES[selectedProcessState.recipe].name}产品</span><strong>{selectedProcessState.produced}件</strong></div></>}
-        {panel === "shop" && <><h2>生活商店</h2><p className="panel-note">购买补给、人物和限时自动化服务。</p><ShopRow title="罐头 ×1" price={2} disabled={game.coins < 2} onClick={() => spend(() => buyCans(game, 1), "已购买罐头", "金币不足")} /><ShopRow title="罐头 ×10" price={20} disabled={game.coins < 20} onClick={() => spend(() => buyCans(game, 10), "已购买10个罐头", "金币不足")} /><ShopRow title={`罐头起子 🥫${game.canOpenerSeconds > 0 ? ` · 生效${Math.ceil(game.canOpenerSeconds)}s` : game.canOpenerCooldown > 0 ? ` · 冷却${Math.ceil(game.canOpenerCooldown)}s` : ""}`} price={300} disabled={game.coins < 300 || game.canOpenerCooldown > 0} onClick={() => spend(() => buyCanOpener(game), "生活区心情恢复速度提升50%，持续60秒", game.canOpenerCooldown > 0 ? "罐头起子仍在五分钟冷却中" : "金币不足")} /><ShopRow title="随机小人" price={100} disabled={game.coins < 100} onClick={buyNewWorker} /><ShopRow title="重生药水 🧪" price={200} disabled={game.coins < 200} onClick={() => spend(() => buyRebirthPotion(game), "药水已放入人物管理栏", "金币不足")} /><ShopRow title={`自动调度服务 🦾 ×${game.schedulerBots}${game.schedulerSeconds > 0 ? ` · ${formatClock(game.schedulerSeconds)}` : ""}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} /><ShopRow title={`增加调度机器人 · 当前${game.schedulerBots}台`} price={1000} disabled={game.coins < 1000} onClick={() => spend(() => buySchedulerBot(game), `已增加第${game.schedulerBots + 1}台调度机器人`, "金币不足")} /><ShopRow title="新地块（起）" price={300} disabled={game.coins < 300} onClick={() => setPanel("plotBuilder")} /></>}
+        {panel === "shop" && <><h2>生活商店</h2><p className="panel-note">购买补给、人物和限时自动化服务。</p><CanPurchaseRow selectedIndex={canPurchaseIndex} coins={game.coins} onChange={setCanPurchaseIndex} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} /><AutoCanSupplyRow enabled={game.autoCanSupply} coins={game.coins} onBuy={() => spend(() => buyAutoCanSupply(game), "自动补给罐头已启用", "金币不足")} /><ShopRow title={`罐头起子 🥫${game.canOpenerSeconds > 0 ? ` · 生效${Math.ceil(game.canOpenerSeconds)}s` : game.canOpenerCooldown > 0 ? ` · 冷却${Math.ceil(game.canOpenerCooldown)}s` : ""}`} price={300} disabled={game.coins < 300 || game.canOpenerCooldown > 0} onClick={() => spend(() => buyCanOpener(game), "生活区心情恢复速度提升50%，持续60秒", game.canOpenerCooldown > 0 ? "罐头起子仍在五分钟冷却中" : "金币不足")} /><ShopRow title="随机小人" price={100} disabled={game.coins < 100} onClick={buyNewWorker} /><ShopRow title="重生药水 🧪" price={200} disabled={game.coins < 200} onClick={() => spend(() => buyRebirthPotion(game), "药水已放入人物管理栏", "金币不足")} /><ShopRow title={`自动调度服务 🦾 ×${game.schedulerBots}${game.schedulerSeconds > 0 ? ` · ${formatClock(game.schedulerSeconds)}` : ""}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} /><ShopRow title={`增加调度机器人 · 当前${game.schedulerBots}台`} price={1000} disabled={game.coins < 1000} onClick={() => spend(() => buySchedulerBot(game), `已增加第${game.schedulerBots + 1}台调度机器人`, "金币不足")} /><ShopRow title="新地块（起）" price={300} disabled={game.coins < 300} onClick={() => setPanel("plotBuilder")} /></>}
         {panel === "plotBuilder" && <><h2>购买新地块</h2><p className="panel-note">4×4为300金币，8×8为1200金币。</p><div className="builder-options">{(["gather", "process", "living"] as ZoneType[]).map((type) => <button key={type} className={builderType === type ? "is-selected" : ""} onClick={() => setBuilderType(type)}>{ZONE_META[type].name}</button>)}</div><div className="builder-options size-options">{([4, 8] as const).map((size) => <button key={size} className={builderSize === size ? "is-selected" : ""} onClick={() => setBuilderSize(size)}>{size}×{size}<small>{plotPurchasePrice(size)}金币 · 容纳{size * size / 4}人</small></button>)}</div><button className="primary-action" disabled={game.coins < selectedPlotPrice} onClick={beginPlotPlacement}>购买并选择位置 · {selectedPlotPrice}金币</button>{placingPlot && <button className="cancel-placement" onClick={cancelPurchasedPlot}>取消摆放</button>}</>}
         {panel === "sell" && <><h2>出售产品</h2><div className="market-strip"><span>粗制 {game.market.roughPrice} <b className={game.market.roughPrice >= 10 ? "up" : "down"}>{Math.round((game.market.roughPrice / 10 - 1) * 100)}%</b></span><span>精制 {game.market.refinedPrice} <b className={game.market.refinedPrice >= 30 ? "up" : "down"}>{Math.round((game.market.refinedPrice / 30 - 1) * 100)}%</b></span><strong>{formatClock(marketRemaining)}</strong></div><p className="panel-note">价格涨幅与下次刷新倒计时</p><ShopRow title={`粗加工 ×${game.inventory.rough}`} price={game.inventory.rough * game.market.roughPrice} disabled={!game.inventory.rough} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "rough"))} /><ShopRow title={`精加工 ×${game.inventory.refined}`} price={game.inventory.refined * game.market.refinedPrice} disabled={!game.inventory.refined} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "refined"))} /><button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button></>}
       </aside>}
@@ -1031,4 +1034,15 @@ function RebirthConfirm({ worker, next, onCancel, onConfirm }: { worker: WorkerS
 
 function ShopRow({ title, price, disabled, onClick, verb = "购买" }: { title: string; price: number; disabled: boolean; onClick: () => void; verb?: string }) {
   return <div className="shop-row"><span title={title}>{title}</span><button disabled={disabled} onClick={onClick}>{verb} · {format(price)} 金币</button></div>;
+}
+
+function CanPurchaseRow({ selectedIndex, coins, onChange, onBuy }: { selectedIndex: number; coins: number; onChange: (index: number) => void; onBuy: (amount: number) => void }) {
+  const amount = CAN_PURCHASE_AMOUNTS[selectedIndex];
+  const price = amount * 2;
+  return <div className="can-purchase"><div className="can-purchase-control"><div className="can-purchase-head"><strong>罐头 ×{amount}</strong><span>选择数量</span></div><input aria-label="罐头购买数量" type="range" min="0" max="3" step="1" value={selectedIndex} onChange={(event) => onChange(Number(event.target.value))} /><div className="can-purchase-marks">{CAN_PURCHASE_AMOUNTS.map((value, index) => <button type="button" key={value} aria-pressed={index === selectedIndex} className={index === selectedIndex ? "is-selected" : ""} onClick={() => onChange(index)}>{value}</button>)}</div></div><button className="can-purchase-button" disabled={coins < price} onClick={() => onBuy(amount)}>购买 · {format(price)} 金币</button></div>;
+}
+
+function AutoCanSupplyRow({ enabled, coins, onBuy }: { enabled: boolean; coins: number; onBuy: () => void }) {
+  const title = enabled ? "自动补给罐头 · 已启用" : "自动补给罐头 · 库存低于20";
+  return <div className="shop-row auto-can-row"><span title="低于20时自动购买50个，每次花费100金币">{title}</span><button disabled={enabled || coins < 5000} onClick={onBuy}>{enabled ? "已启用" : "购买 · 5,000 金币"}</button></div>;
 }

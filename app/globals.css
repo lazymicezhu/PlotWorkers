@@ -453,8 +453,27 @@ button { font: inherit; }
 }
 .shop-row button { width: 112px; height: 34px; line-height: 34px; white-space: nowrap; }
 .shop-row button:disabled,
+.can-purchase-button:disabled,
+.auto-can-row button:disabled,
 .sell-all:disabled { opacity: .35; cursor: not-allowed; }
 .sell-all { width: 100%; margin-top: 14px; padding: 11px; background: #9a6b3f; }
+
+.can-purchase { display: grid; grid-template-columns: minmax(0, 1fr) 112px; align-items: center; gap: 10px; height: 64px; border-bottom: 1px solid #edf0eb; }
+.can-purchase-control { min-width: 0; }
+.can-purchase-head { display: flex; align-items: center; justify-content: space-between; color: #3c493f; font-size: 10px; line-height: 1; }
+.can-purchase-head span { color: #8a938c; font-size: 8px; }
+.can-purchase input { width: 100%; height: 10px; margin: 5px 0 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; }
+.can-purchase input::-webkit-slider-runnable-track { height: 3px; border-radius: 99px; background: #dce4dc; }
+.can-purchase input::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; border: 2px solid #fff; border-radius: 50%; appearance: none; -webkit-appearance: none; background: #55745a; box-shadow: 0 0 0 1px #55745a; }
+.can-purchase input::-moz-range-track { height: 3px; border: 0; border-radius: 99px; background: #dce4dc; }
+.can-purchase input::-moz-range-thumb { width: 9px; height: 9px; border: 2px solid #fff; border-radius: 50%; background: #55745a; box-shadow: 0 0 0 1px #55745a; }
+.can-purchase-marks { display: flex; align-items: center; justify-content: space-between; margin-top: -1px; }
+.can-purchase-marks button { flex: 0 0 11px; width: 11px; min-width: 0; padding: 1px 0; overflow: visible; border: 0; color: #89928b; background: transparent; font-size: 8px; line-height: 1; text-align: center; cursor: pointer; }
+.can-purchase-marks button.is-selected { color: #36523c; font-weight: 700; }
+.can-purchase-button,
+.auto-can-row button { height: 34px; padding: 0 8px; border: 0; border-radius: 8px; color: #fff; background: #55745a; font-size: 10px; white-space: nowrap; cursor: pointer; }
+.can-purchase-button,
+.auto-can-row button { width: 112px; }
 
 .notice {
   position: fixed;
