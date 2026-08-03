@@ -6,6 +6,7 @@ import {
   PointerEvent,
   WheelEvent,
   memo,
+  startTransition,
   useEffect,
   useMemo,
   useRef,
@@ -38,11 +39,14 @@ import {
   plotPurchasePrice,
   recyclePlot,
   sellProducts,
-  stepGame,
   toggleSchedulerDuty,
   upgradeSchedulerEfficiency,
   upgradeSchedulerInterval,
 } from "./game-engine";
+import { simulateElapsed } from "./simulation-protocol";
+import type { SimulationStepRequest, SimulationStepResponse } from "./simulation-protocol";
+import SimulationWorker from "./simulation.worker?worker";
+import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -74,6 +78,12 @@ type AutoTransfer = {
   action: "rest" | "work" | "wake";
 };
 
+type PendingSimulation = {
+  id: number;
+  base: GameState;
+  seconds: number;
+};
+
 const PlotSurface = memo(function PlotSurface({ plot }: { plot: PlotState }) {
   return <img className="plot-surface" src={`/plot-${plot.type}-${plot.cols}.png`} alt="" draggable={false} />;
 }, (previous, next) => previous.plot.id === next.plot.id && previous.plot.cols === next.plot.cols && previous.plot.rows === next.plot.rows && previous.plot.type === next.plot.type);
@@ -99,7 +109,7 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
     onPointerDown={(event) => onDown(event, worker.id)}
     onPointerEnter={(event) => onEnter(event, worker.id)}
     onPointerLeave={onLeave}
-    style={{ "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: (hasStatusBadge ? 100000 : 1000) + Math.round(projected.y), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
+    style={{ "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: dragging || automated ? SCENE_DRAG_Z : sceneDepth(projected.y, hasStatusBadge ? 20_000 : 0), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
     role="button"
     aria-label={`${worker.name}，${STATUS_NAMES[worker.status]}`}
   >
@@ -217,6 +227,10 @@ export default function Home() {
   const autoCooldownRef = useRef<number[]>([]);
   const autoFinishTimersRef = useRef<number[]>([]);
   const movementCursorRef = useRef(0);
+  const simulationWorkerRef = useRef<Worker | null>(null);
+  const pendingSimulationRef = useRef<PendingSimulation | null>(null);
+  const simulationRequestIdRef = useRef(0);
+  const unsimulatedSecondsRef = useRef(0);
   const [game, setGame] = useState<GameState>(() => createInitialState(initialPoint.x, initialPoint.y));
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
@@ -271,6 +285,39 @@ export default function Home() {
   useEffect(() => { gameRef.current = game; }, [game]);
 
   useEffect(() => {
+    if (typeof Worker === "undefined") return;
+    let worker: Worker;
+    try {
+      worker = new SimulationWorker();
+    } catch {
+      return;
+    }
+    simulationWorkerRef.current = worker;
+    worker.onmessage = (event: MessageEvent<SimulationStepResponse>) => {
+      const pending = pendingSimulationRef.current;
+      if (event.data.type !== "stepped" || !pending || event.data.id !== pending.id) return;
+      startTransition(() => {
+        setGame((current) => {
+          pendingSimulationRef.current = null;
+          if (current !== pending.base) return current;
+          unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
+          return event.data.state;
+        });
+      });
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      if (simulationWorkerRef.current === worker) simulationWorkerRef.current = null;
+      pendingSimulationRef.current = null;
+    };
+    return () => {
+      worker.terminate();
+      if (simulationWorkerRef.current === worker) simulationWorkerRef.current = null;
+      pendingSimulationRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     const saved = parseSavedState(localStorage.getItem(SAVE_KEY));
     if (saved) {
       setGame(saved);
@@ -290,16 +337,27 @@ export default function Home() {
       const now = performance.now();
       if (document.visibilityState === "visible") {
         const elapsed = Math.min(5, (now - last) / 1000);
-        setGame((current) => {
-          let next = current;
-          let remaining = elapsed;
-          while (remaining > 0) {
-            const dt = Math.min(1, remaining);
-            next = stepGame(next, dt);
-            remaining -= dt;
-          }
-          return next;
-        });
+        unsimulatedSecondsRef.current = Math.min(5, unsimulatedSecondsRef.current + elapsed);
+        const worker = simulationWorkerRef.current;
+        if (worker && !pendingSimulationRef.current) {
+          const id = ++simulationRequestIdRef.current;
+          const request: SimulationStepRequest = {
+            type: "step",
+            id,
+            state: gameRef.current,
+            seconds: unsimulatedSecondsRef.current,
+          };
+          pendingSimulationRef.current = { id, base: gameRef.current, seconds: request.seconds };
+          worker.postMessage(request);
+        } else if (!worker) {
+          const seconds = unsimulatedSecondsRef.current;
+          startTransition(() => {
+            setGame((current) => {
+              unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - seconds);
+              return simulateElapsed(current, seconds);
+            });
+          });
+        }
       }
       last = now;
     }, 1000);
@@ -911,7 +969,7 @@ export default function Home() {
               : project(plot, worker.u, worker.v);
           return <WalkerSprite key={worker.id} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id} hovered={hoveredWorker === worker.id} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={() => { hoveredWorkerRef.current = null; setHoveredWorker(null); }} />;
         })}
-        {autoTransfers.map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.action === "wake" ? "is-waking" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: transfer.active ? transfer.to.y - 115 : transfer.from.y - 115, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{transfer.action === "wake" ? "唤醒摸鱼" : `调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
+        {autoTransfers.map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.action === "wake" ? "is-waking" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: transfer.active ? transfer.to.y - 115 : transfer.from.y - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{transfer.action === "wake" ? "唤醒摸鱼" : `调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
       </div>
 
       <WorkerManager workers={game.workers} selected={selectedWorker} trackedId={trackedId} activeSection={activeManager} potions={game.inventory.potions} coins={game.coins} robots={game.schedulerRobots} onSelect={trackWorker} onToggle={toggleManager} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} onPotionDown={onPotionDown} />

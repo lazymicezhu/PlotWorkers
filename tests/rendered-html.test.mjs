@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdir } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -32,4 +33,9 @@ test("server-renders the complete workshop scene", async () => {
   assert.doesNotMatch(html, /class="tile /);
   assert.match(html, /重新开始/);
   assert.doesNotMatch(html, /Your site is taking shape|Building your site/);
+});
+
+test("bundles the background simulation worker", async () => {
+  const assets = await readdir(new URL("../dist/client/assets/", import.meta.url));
+  assert.ok(assets.some((name) => /^simulation\.worker-.*\.js$/.test(name)));
 });

@@ -22,6 +22,8 @@ import {
   upgradeSchedulerEfficiency,
   upgradeSchedulerInterval,
 } from "../app/game-engine.ts";
+import { simulateElapsed } from "../app/simulation-protocol.ts";
+import { SCENE_DRAG_Z, sceneDepth } from "../app/scene-depth.ts";
 
 const state = () => createInitialState(0, 0);
 
@@ -39,6 +41,21 @@ test("gathering produces raw material and drains mood", () => {
   assert.equal(next.inventory.raw, 10);
   assert.equal(next.workers[0].mood, 99);
   assert.equal(next.workers[0].status, "gathering");
+});
+
+test("background simulation advances elapsed time in fixed steps", () => {
+  const game = state();
+  game.workers[0].zoneId = "gather";
+  game.workers[0].status = "idle";
+  const next = simulateElapsed(game, 2.5, () => 1);
+  assert.equal(next.inventory.raw, 25);
+  assert.equal(next.workers[0].mood, 97.5);
+});
+
+test("scene depth keeps workers above plots at negative world coordinates", () => {
+  assert.ok(sceneDepth(-1500) > 100);
+  assert.ok(sceneDepth(-1200) > sceneDepth(-1500));
+  assert.ok(SCENE_DRAG_Z > sceneDepth(500000));
 });
 
 test("leader bonuses stack linearly in one work zone", () => {
