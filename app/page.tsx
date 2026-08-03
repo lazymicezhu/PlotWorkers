@@ -100,12 +100,12 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
   const automated = Boolean(autoTransfer);
   const hasStatusBadge = worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking";
   return <div
-    className={`walker motion-${worker.motion} ${worker.moving && worker.status !== "dragging" && !hovered ? "is-walking" : ""} ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${autoTransfer?.action === "wake" ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
+    className={`walker ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${autoTransfer?.action === "wake" ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
     data-worker-id={worker.id}
     onPointerDown={(event) => onDown(event, worker.id)}
     onPointerEnter={(event) => onEnter(event, worker.id)}
     onPointerLeave={onLeave}
-    style={{ left: projected.x, top: projected.y, zIndex: (hasStatusBadge ? 100000 : 1000) + Math.round(projected.y), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
+    style={{ "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: (hasStatusBadge ? 100000 : 1000) + Math.round(projected.y), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
     role="button"
     aria-label={`${worker.name}，${STATUS_NAMES[worker.status]}`}
   >
@@ -117,8 +117,6 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
   previous.worker.id === next.worker.id &&
   previous.worker.name === next.worker.name &&
   previous.worker.status === next.worker.status &&
-  previous.worker.motion === next.worker.motion &&
-  previous.worker.moving === next.worker.moving &&
   previous.worker.duration === next.worker.duration &&
   previous.worker.facing === next.worker.facing &&
   previous.projected.x === next.projected.x &&
@@ -205,7 +203,7 @@ function statusAfterDrop(worker: WorkerState, plot: PlotState | null) {
 
 function restoreWorker(worker: WorkerState, plots: PlotState[]): WorkerState {
   const plot = plots.find((item) => item.id === worker.zoneId) ?? null;
-  return { ...worker, moving: false, motion: "idle", status: worker.status === "dragging" ? statusAfterDrop(worker, plot) : worker.status };
+  return { ...worker, status: worker.status === "dragging" ? statusAfterDrop(worker, plot) : worker.status };
 }
 
 const initialLiving = INITIAL_PLOTS.find((plot) => plot.id === "living")!;
@@ -233,6 +231,7 @@ export default function Home() {
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
   const [camera, setCamera] = useState({ x: 0, y: 0 });
+  const [viewportSize, setViewportSize] = useState({ width: 1440, height: 900 });
   const [hoveredPlot, setHoveredPlot] = useState<ZoneId | null>(null);
   const [hoveredWorker, setHoveredWorker] = useState<string | null>(null);
   const hoveredWorkerRef = useRef<string | null>(null);
@@ -267,6 +266,17 @@ export default function Home() {
   const selectedPlotPrice = plotPurchasePrice(builderSize);
   const selectedProcessPlot = game.plots.find((plot) => plot.id === selectedProcessPlotId && plot.type === "process");
   const selectedProcessState = selectedProcessPlot ? game.processPlots[selectedProcessPlot.id] : null;
+  const visibleBounds = useMemo(() => {
+    const margin = 240;
+    const centerX = WORLD_W / 2 - camera.x / zoom;
+    const centerY = WORLD_H / 2 - camera.y / zoom;
+    return {
+      left: centerX - viewportSize.width / (2 * zoom) - margin,
+      right: centerX + viewportSize.width / (2 * zoom) + margin,
+      top: centerY - viewportSize.height / (2 * zoom) - margin,
+      bottom: centerY + viewportSize.height / (2 * zoom) + margin,
+    };
+  }, [camera, viewportSize, zoom]);
 
   useEffect(() => { gameRef.current = game; }, [game]);
 
@@ -278,6 +288,10 @@ export default function Home() {
     }
     const fit = Math.min(.78, (window.innerWidth - 30) / WORLD_W, (window.innerHeight - 90) / WORLD_H);
     setZoom(Math.max(.32, fit));
+    const updateViewportSize = () => setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    updateViewportSize();
+    window.addEventListener("resize", updateViewportSize);
+    return () => window.removeEventListener("resize", updateViewportSize);
   }, []);
 
   useEffect(() => {
@@ -306,22 +320,21 @@ export default function Home() {
     const timer = window.setInterval(() => {
       setGame((current) => {
         const plotsById = new Map(current.plots.map((plot) => [plot.id, plot]));
-        const animationChance = Math.min(1, 120 / Math.max(1, current.workers.length));
+        const animationBudget = current.workers.length > 300 ? 40 : current.workers.length > 150 ? 70 : 120;
+        const animationChance = Math.min(1, animationBudget / Math.max(1, current.workers.length));
         return {
           ...current,
           workers: current.workers.map((worker) => {
           if (worker.id === draggingIdRef.current || worker.id === hoveredWorkerRef.current || !worker.zoneId || worker.status === "dragging" || worker.status === "exhausted") return worker;
           const plot = plotsById.get(worker.zoneId);
           if (!plot) return worker;
-          if (Math.random() > animationChance) return worker.moving || worker.motion !== "idle" ? { ...worker, moving: false, motion: "idle" } : worker;
-          const behavior = Math.random();
-          if (behavior < .25) return { ...worker, moving: false, motion: "idle" };
-          if (behavior < .4) return { ...worker, moving: false, motion: "spin", facing: worker.facing === "left" ? "right" : "left" };
+          if (Math.random() > animationChance * .6) return worker;
           const u = .55 + Math.random() * (plot.cols - 1.1);
           const v = .55 + Math.random() * (plot.rows - 1.1);
           const next = project(plot, u, v);
-          const duration = behavior < .58 ? 1500 : behavior < .78 ? 4800 : 3200;
-          return { ...worker, u, v, ...next, moving: true, motion: "walk", duration, facing: next.x < worker.x ? "left" : "right" };
+          const speed = Math.random();
+          const duration = speed < .25 ? 1500 : speed < .65 ? 4800 : 3200;
+          return { ...worker, u, v, ...next, duration, facing: next.x < worker.x ? "left" : "right" };
           }),
         };
       });
@@ -401,7 +414,7 @@ export default function Home() {
     draggingIdRef.current = id;
     setSelectedId(id);
     setDraggingId(id);
-    setGame((current) => ({ ...current, workers: current.workers.map((item) => item.id === id ? { ...item, moving: false, motion: "idle", status: "dragging" } : item) }));
+    setGame((current) => ({ ...current, workers: current.workers.map((item) => item.id === id ? { ...item, status: "dragging" } : item) }));
     const move = (nativeEvent: globalThis.PointerEvent) => moveWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
     const finishPointer = (nativeEvent: globalThis.PointerEvent) => finishWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
     const finishMouse = (nativeEvent: MouseEvent) => finishWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
@@ -428,8 +441,8 @@ export default function Home() {
     dragPositionRef.current = point;
     const element = dragElementRef.current;
     if (element) {
-      element.style.left = `${point.x}px`;
-      element.style.top = `${point.y}px`;
+      element.style.setProperty("--worker-x", `${point.x}px`);
+      element.style.setProperty("--worker-y", `${point.y}px`);
       const facingLeft = point.x < (dragOrigin.current?.x ?? point.x);
       element.classList.toggle("facing-left", facingLeft);
       element.classList.toggle("facing-right", !facingLeft);
@@ -448,11 +461,11 @@ export default function Home() {
       workers: current.workers.map((worker) => {
         if (worker.id !== id) return worker;
         const plot = current.plots.find((item) => item.id === worker.zoneId);
-        if (!plot) return { ...worker, moving: false, motion: "idle", ...currentPosition };
+        if (!plot) return { ...worker, ...currentPosition };
         const raw = unproject(plot, currentPosition.x, currentPosition.y);
         const u = Math.max(.4, Math.min(plot.cols - .4, raw.u));
         const v = Math.max(.4, Math.min(plot.rows - .4, raw.v));
-        return { ...worker, u, v, ...project(plot, u, v), moving: false, motion: "idle" };
+        return { ...worker, u, v, ...project(plot, u, v) };
       }),
     }));
   }
@@ -481,7 +494,7 @@ export default function Home() {
           const lastWorkZoneId = target.type === "living"
             ? (source && source.type !== "living" ? source.id : worker.lastWorkZoneId)
             : target.id;
-          return { ...worker, zoneId: target.id, u, v, ...project(target, u, v), moving: false, motion: "idle", duration: 500, facing: point.x < origin.x ? "left" : "right", status: statusAfterDrop(worker, target), lastWorkZoneId, continuousWork: changedZone ? 0 : worker.continuousWork, slowStacks: changedZone ? 0 : worker.slowStacks, lazyElapsed: 0 };
+          return { ...worker, zoneId: target.id, u, v, ...project(target, u, v), duration: 500, facing: point.x < origin.x ? "left" : "right", status: statusAfterDrop(worker, target), lastWorkZoneId, continuousWork: changedZone ? 0 : worker.continuousWork, slowStacks: changedZone ? 0 : worker.slowStacks, lazyElapsed: 0 };
         }),
       };
       localStorage.setItem(SAVE_KEY, JSON.stringify(next));
@@ -715,7 +728,7 @@ export default function Home() {
     const robot = current.schedulerRobots[botIndex] ?? { efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } };
     const durationMs = Math.max(450, Math.round((decision!.action === "wake" ? 1400 : 1800) / robot.efficiency));
     const transfer: AutoTransfer = { botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, action: decision!.action };
-    setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker!.id ? { ...item, status: "dragging", moving: false, motion: "idle" } : item) }));
+    setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker!.id ? { ...item, status: "dragging" } : item) }));
     replaceAutoTransfers((transfers) => [...transfers, transfer]);
     window.requestAnimationFrame(() => replaceAutoTransfers((transfers) => transfers.map((value) => value.workerId === worker!.id ? { ...value, active: true } : value)));
     const finishTimer = window.setTimeout(() => {
@@ -732,8 +745,6 @@ export default function Home() {
             v,
             ...project(destination, u, v),
             status: statusAfterDrop(item, destination),
-            moving: false,
-            motion: "idle",
             duration: 500,
             lastWorkZoneId: destination.type === "living"
               ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId)
@@ -827,6 +838,18 @@ export default function Home() {
   }
 
   const renderedPlots = placingPlot ? [...displayPlots, placingPlot.plot] : displayPlots;
+  const visiblePlots = renderedPlots.filter((plot) => {
+    if (plot.id === placingPlot?.plot.id || plot.id === plotDraft?.plot.id) return true;
+    const plotWidth = plot.cols * TILE_W;
+    const plotHeight = plot.rows * TILE_H + CUBE_DEPTH;
+    return plot.x + plotWidth >= visibleBounds.left && plot.x <= visibleBounds.right && plot.y + plotHeight >= visibleBounds.top && plot.y <= visibleBounds.bottom;
+  });
+  const visibleWorkers = game.workers.filter((worker) => {
+    if (worker.id === draggingId || worker.id === trackedId || worker.id === hoveredWorker || autoTransferByWorker.has(worker.id)) return true;
+    const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
+    const point = plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y };
+    return point.x >= visibleBounds.left && point.x <= visibleBounds.right && point.y >= visibleBounds.top && point.y <= visibleBounds.bottom;
+  });
 
   return (
     <main
@@ -850,8 +873,8 @@ export default function Home() {
         <button className="reset-button" onClick={resetGame}>{resetArmed ? "再次点击确认" : "重新开始"}</button>
       </header>
 
-      <div className={`world ${game.workers.length > 150 ? "is-large-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, "--camera-x": `${camera.x}px`, "--camera-y": `${camera.y}px` } as CSSProperties}>
-        {renderedPlots.map((plot) => {
+      <div className={`world ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, "--camera-x": `${camera.x}px`, "--camera-y": `${camera.y}px` } as CSSProperties}>
+        {visiblePlots.map((plot) => {
           const isPlacement = placingPlot?.plot.id === plot.id;
           const isMoving = plotDraft?.plot.id === plot.id;
           const valid = isPlacement ? placingPlot.valid : isMoving ? plotDraft.valid : true;
@@ -872,7 +895,7 @@ export default function Home() {
           </section>;
         })}
 
-        {game.workers.map((worker) => {
+        {visibleWorkers.map((worker) => {
           const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
           const autoTransfer = autoTransferByWorker.get(worker.id);
           const automated = Boolean(autoTransfer);
@@ -911,6 +934,19 @@ function Resource({ label, value, accent = false, warning = false }: { label: st
   return <div className={`resource ${accent ? "is-accent" : ""} ${warning ? "is-warning" : ""}`}><span>{label}</span><strong>{typeof value === "number" ? format(value) : value}</strong></div>;
 }
 
+const WORKER_ROW_HEIGHT = 52;
+
+function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { workers: WorkerState[]; selectedId?: string; trackedId: string | null; onSelect: (worker: WorkerState) => void }) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const start = Math.max(0, Math.floor(scrollTop / WORKER_ROW_HEIGHT) - 3);
+  const end = Math.min(workers.length, start + 13);
+  return <div className="worker-list" style={{ height: Math.min(290, workers.length * WORKER_ROW_HEIGHT + 12) }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
+    <div className="worker-list-inner" style={{ height: workers.length * WORKER_ROW_HEIGHT }}>
+      {workers.slice(start, end).map((worker, offset) => <button key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} onClick={() => onSelect(worker)}><i /><span><strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}</strong><small>{STATUS_NAMES[worker.status]}</small></span><b>{Math.round(worker.mood)}</b></button>)}
+    </div>
+  </div>;
+}
+
 function WorkerManager({ workers, selected, trackedId, activeSection, potions, coins, robots, onSelect, onToggle, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval, onPotionDown }: { workers: WorkerState[]; selected: WorkerState | null; trackedId: string | null; activeSection: "workers" | "robots" | null; potions: number; coins: number; robots: SchedulerRobotState[]; onSelect: (worker: WorkerState) => void; onToggle: (section: "workers" | "robots") => void; onToggleDuty: (index: number, duty: SchedulerDuty) => void; onUpgradeEfficiency: (index: number) => void; onUpgradeInterval: (index: number) => void; onPotionDown: (event: PointerEvent<HTMLButtonElement>) => void }) {
   const workersOpen = activeSection === "workers";
   const robotsOpen = activeSection === "robots";
@@ -918,7 +954,7 @@ function WorkerManager({ workers, selected, trackedId, activeSection, potions, c
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
     <div className="manager-head"><strong>人物管理</strong><span>{workers.length}人</span><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
     {workersOpen && <>{potions > 0 && <button className="potion-token" onPointerDown={onPotionDown} aria-label="拖动重生药水到人物">🧪<span>×{potions} 拖到人物</span></button>}
-    <div className="worker-list">{workers.map((worker) => <button key={worker.id} className={selected?.id === worker.id ? "is-selected" : ""} onClick={() => onSelect(worker)}><i style={{ "--mood": `${worker.mood}%` } as CSSProperties} /><span><strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}</strong><small>{STATUS_NAMES[worker.status]}</small></span><b>{Math.round(worker.mood)}</b></button>)}</div>
+    <VirtualWorkerList workers={workers} selectedId={selected?.id} trackedId={trackedId} onSelect={onSelect} />
     {selected && <div className="manager-detail"><div><strong>{selected.name}</strong><span>{PERSONALITY_NAMES[selected.personality]}</span></div><p>心情 <b>{Math.round(selected.mood)}</b></p><div className="manager-stats"><span>体力<b>{selected.stamina}</b></span><span>效率<b>{selected.efficiency}</b></span><span>精力<b>{selected.spirit}</b></span></div><small>点击人物列表可追踪其当前位置</small></div>}</>}
     </section>
     <section className={`manager-section robot-section ${robotsOpen ? "is-open" : ""}`}>

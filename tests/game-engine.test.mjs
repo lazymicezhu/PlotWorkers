@@ -142,7 +142,8 @@ test("saved transient drag state is recovered safely", async () => {
   game.plots.forEach((plot) => { plot.purchasePrice = 0; });
   const restored = parseSavedState(JSON.stringify(game));
   assert.equal(restored.workers[0].status, "ready");
-  assert.equal(restored.workers[0].moving, false);
+  assert.equal("moving" in restored.workers[0], false);
+  assert.equal("motion" in restored.workers[0], false);
   assert.equal(restored.market.refinedPrice, 36);
   assert.deepEqual(restored.plots.map((plot) => plot.purchasePrice), [1200, 1200, 300]);
 });
@@ -303,7 +304,6 @@ test("version one saves migrate plots, potions and movement state", async () => 
   old.version = 1;
   delete old.plots;
   delete old.inventory.potions;
-  delete old.workers[0].motion;
   delete old.schedulerBots;
   delete old.schedulerRobots;
   delete old.canOpenerSeconds;
@@ -316,7 +316,7 @@ test("version one saves migrate plots, potions and movement state", async () => 
   assert.equal(migrated.version, 3);
   assert.equal(migrated.plots.length, 3);
   assert.equal(migrated.inventory.potions, 0);
-  assert.equal(migrated.workers[0].motion, "idle");
+  assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
   assert.deepEqual(migrated.schedulerRobots, [{ efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } }]);
   assert.equal(migrated.canOpenerSeconds, 0);

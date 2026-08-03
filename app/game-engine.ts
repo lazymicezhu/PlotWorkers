@@ -27,13 +27,11 @@ export type WorkerState = {
   v: number;
   x: number;
   y: number;
-  moving: boolean;
   duration: number;
   facing: "left" | "right";
   continuousWork: number;
   lazyElapsed: number;
   slowStacks: number;
-  motion: "idle" | "walk" | "spin";
   lastWorkZoneId: ZoneId | null;
 };
 
@@ -157,13 +155,11 @@ export function createInitialWorker(x: number, y: number): WorkerState {
     v: 2,
     x,
     y,
-    moving: false,
     duration: 800,
     facing: "right",
     continuousWork: 0,
     lazyElapsed: 0,
     slowStacks: 0,
-    motion: "idle",
     lastWorkZoneId: null,
   };
 }
@@ -698,19 +694,20 @@ export function parseSavedState(value: string | null): GameState | null {
         roughPrice: Math.round(parsed.market.roughPrice),
         refinedPrice: Math.round(parsed.market.refinedPrice),
       },
-      workers: parsed.workers.map((worker) => ({
-        ...worker,
-        motion: worker.motion ?? "idle",
-        lastWorkZoneId: worker.lastWorkZoneId ?? null,
-        ...(worker.status === "dragging" ? {
-          moving: false,
-          status: worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
-            ? (worker.mood >= 100 ? "ready" : "resting")
-            : worker.mood <= 0
-              ? "exhausted"
-              : "idle",
-        } : {}),
-      })),
+      workers: parsed.workers.map((worker) => {
+        const { moving: _moving, motion: _motion, ...rest } = worker as WorkerState & { moving?: boolean; motion?: string };
+        return {
+          ...rest,
+          lastWorkZoneId: worker.lastWorkZoneId ?? null,
+          ...(worker.status === "dragging" ? {
+            status: worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
+              ? (worker.mood >= 100 ? "ready" : "resting")
+              : worker.mood <= 0
+                ? "exhausted"
+                : "idle",
+          } : {}),
+        };
+      }),
     };
   } catch {
     return null;
