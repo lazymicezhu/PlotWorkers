@@ -61,14 +61,13 @@ export type ProcessPlotState = {
 };
 
 export type GameState = {
-  version: 4;
+  version: 6;
   coins: number;
   inventory: {
     raw: number;
     cans: number;
     rough: number;
     refined: number;
-    potions: number;
   };
   plots: PlotState[];
   workers: WorkerState[];
@@ -80,6 +79,8 @@ export type GameState = {
   canOpenerSeconds: number;
   canOpenerCooldown: number;
   autoCanSupply: boolean;
+  autoSchedulerSupply: boolean;
+  schedulerServiceUnlocked: boolean;
 };
 
 export const INITIAL_PLOTS: PlotState[] = [
@@ -167,9 +168,9 @@ export function createInitialWorker(x: number, y: number): WorkerState {
 
 export function createInitialState(x: number, y: number): GameState {
   return {
-    version: 4,
+    version: 6,
     coins: 100,
-    inventory: { raw: 0, cans: 20, rough: 0, refined: 0, potions: 0 },
+    inventory: { raw: 0, cans: 20, rough: 0, refined: 0 },
     plots: INITIAL_PLOTS.map((plot) => ({ ...plot })),
     workers: [createInitialWorker(x, y)],
     processPlots: {
@@ -182,6 +183,8 @@ export function createInitialState(x: number, y: number): GameState {
     canOpenerSeconds: 0,
     canOpenerCooldown: 0,
     autoCanSupply: false,
+    autoSchedulerSupply: false,
+    schedulerServiceUnlocked: false,
   };
 }
 
@@ -236,6 +239,11 @@ export function buyCans(state: GameState, amount: number): GameState {
 export function buyAutoCanSupply(state: GameState): GameState {
   if (state.autoCanSupply || state.coins < 5000) return state;
   return { ...state, coins: state.coins - 5000, autoCanSupply: true };
+}
+
+export function buyAutoSchedulerSupply(state: GameState): GameState {
+  if (state.autoSchedulerSupply || state.coins < 5000) return state;
+  return { ...state, coins: state.coins - 5000, autoSchedulerSupply: true, schedulerServiceUnlocked: true };
 }
 
 export function buyWorker(
@@ -304,7 +312,7 @@ export function recyclePlot(state: GameState, plotId: string): GameState {
 
 export function buyScheduler(state: GameState): GameState {
   if (state.coins < 100) return state;
-  return { ...state, coins: state.coins - 100, schedulerSeconds: state.schedulerSeconds + 60 };
+  return { ...state, coins: state.coins - 100, schedulerSeconds: state.schedulerSeconds + 60, schedulerServiceUnlocked: true };
 }
 
 export function buySchedulerBot(state: GameState): GameState {
@@ -418,34 +426,6 @@ export function chooseAutoDispatch(
   return ready && target ? { workerId: ready.id, targetId: target.id, action: "work" } : null;
 }
 
-export function buyRebirthPotion(state: GameState): GameState {
-  if (state.coins < 200) return state;
-  return {
-    ...state,
-    coins: state.coins - 200,
-    inventory: { ...state.inventory, potions: state.inventory.potions + 1 },
-  };
-}
-
-export function applyRebirth(
-  state: GameState,
-  workerId: string,
-  attributes?: { stamina: number; efficiency: number; spirit: number },
-  random = Math.random,
-): GameState {
-  if (state.inventory.potions < 1 || !state.workers.some((worker) => worker.id === workerId)) return state;
-  return {
-    ...state,
-    inventory: { ...state.inventory, potions: state.inventory.potions - 1 },
-    workers: state.workers.map((worker) => worker.id === workerId ? {
-      ...worker,
-      stamina: attributes?.stamina ?? 1 + Math.floor(random() * 10),
-      efficiency: attributes?.efficiency ?? 1 + Math.floor(random() * 10),
-      spirit: attributes?.spirit ?? 1 + Math.floor(random() * 10),
-    } : worker),
-  };
-}
-
 export function sellProducts(
   state: GameState,
   kind: "rough" | "refined" | "all",
@@ -473,9 +453,9 @@ export function stepGame(
   if (dt <= 0) return state;
   const inventory = { ...state.inventory };
   let coins = state.coins;
-  if (state.autoCanSupply && inventory.cans < 20 && coins >= 100) {
-    inventory.cans += 50;
-    coins -= 100;
+  if (state.autoCanSupply && inventory.cans < 200 && coins >= 400) {
+    inventory.cans += 200;
+    coins -= 400;
   }
   let market = { ...state.market, elapsed: state.market.elapsed + dt };
   if (market.elapsed >= 300) {
@@ -489,7 +469,11 @@ export function stepGame(
   const processPlots = Object.fromEntries(
     Object.entries(state.processPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch } }]),
   );
-  const schedulerSeconds = Math.max(0, state.schedulerSeconds - dt);
+  let schedulerSeconds = Math.max(0, state.schedulerSeconds - dt);
+  if (state.autoSchedulerSupply && schedulerSeconds < 180 && coins >= 300) {
+    schedulerSeconds += 180;
+    coins -= 300;
+  }
   const canOpenerSeconds = Math.max(0, state.canOpenerSeconds - dt);
   const canOpenerCooldown = Math.max(0, state.canOpenerCooldown - dt);
   const workers = state.workers.map((worker) => ({ ...worker }));
@@ -626,7 +610,7 @@ export function parseSavedState(value: string | null): GameState | null {
       batch?: ProcessPlotState["batch"];
     };
     if (
-      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4) ||
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5 && parsed.version !== 6) ||
       !Number.isFinite(parsed.coins) ||
       !Array.isArray(parsed.workers) ||
       !parsed.inventory ||
@@ -689,7 +673,7 @@ export function parseSavedState(value: string | null): GameState | null {
     });
     return {
       ...(parsed as GameState),
-      version: 4,
+      version: 6,
       plots,
       processPlots,
       schedulerSeconds: Number.isFinite(parsed.schedulerSeconds) ? parsed.schedulerSeconds : 0,
@@ -698,9 +682,13 @@ export function parseSavedState(value: string | null): GameState | null {
       canOpenerSeconds: Number.isFinite(parsed.canOpenerSeconds) ? Math.max(0, parsed.canOpenerSeconds) : 0,
       canOpenerCooldown: Number.isFinite(parsed.canOpenerCooldown) ? Math.max(0, parsed.canOpenerCooldown) : 0,
       autoCanSupply: Boolean(parsed.autoCanSupply),
+      autoSchedulerSupply: Boolean(parsed.autoSchedulerSupply),
+      schedulerServiceUnlocked: Boolean(parsed.schedulerServiceUnlocked || parsed.schedulerSeconds! > 0 || parsed.autoSchedulerSupply),
       inventory: {
-        ...parsed.inventory,
-        potions: Number.isFinite(parsed.inventory.potions) ? parsed.inventory.potions : 0,
+        raw: parsed.inventory.raw,
+        cans: parsed.inventory.cans,
+        rough: parsed.inventory.rough,
+        refined: parsed.inventory.refined,
       },
       market: {
         ...parsed.market!,

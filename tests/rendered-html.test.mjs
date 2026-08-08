@@ -26,6 +26,8 @@ test("server-renders the complete workshop scene", async () => {
   assert.match(html, /加工区/);
   assert.match(html, /生活区/);
   assert.match(html, /人物管理/);
+  assert.doesNotMatch(html, /机器人管理/);
+  assert.match(html, /机器人时间\/数量/);
   assert.match(html, /可以工作/);
   assert.match(html, /class="worker-image" src="\/worker\.png"/);
   assert.doesNotMatch(html, /class="(?:hair|face|torso|arm|leg|shoe)"/);

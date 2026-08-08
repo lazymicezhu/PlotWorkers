@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  applyRebirth,
   buyAutoCanSupply,
+  buyAutoSchedulerSupply,
   buyCanOpener,
   buyScheduler,
   buySchedulerBot,
   buyWorker,
   buyPlot,
-  buyRebirthPotion,
   changeRecipe,
   chooseAutoDispatch,
   createInitialState,
@@ -27,6 +26,13 @@ import { simulateElapsed } from "../app/simulation-protocol.ts";
 import { SCENE_DRAG_Z, sceneDepth } from "../app/scene-depth.ts";
 
 const state = () => createInitialState(0, 0);
+
+test("new games start with one robot but locked robot management", () => {
+  const game = state();
+  assert.equal(game.schedulerBots, 1);
+  assert.equal(game.schedulerRobots.length, 1);
+  assert.equal(game.schedulerServiceUnlocked, false);
+});
 
 test("attribute formulas match values 1, 5 and 10", () => {
   assert.deepEqual([staminaDrainRate(1), staminaDrainRate(5), staminaDrainRate(10)], [1.4, 1, .5]);
@@ -92,21 +98,21 @@ test("living area consumes cans only for actual recovery", () => {
   assert.equal(next.workers[0].status, "ready");
 });
 
-test("automatic can supply unlocks once and buys paid refills below 20 cans", () => {
+test("automatic can supply unlocks once and buys 200 paid cans below 200", () => {
   const game = state();
-  game.coins = 5200;
+  game.coins = 5500;
   const unlocked = buyAutoCanSupply(game);
-  assert.equal(unlocked.coins, 200);
+  assert.equal(unlocked.coins, 500);
   assert.equal(unlocked.autoCanSupply, true);
   assert.equal(buyAutoCanSupply(unlocked), unlocked);
-  unlocked.inventory.cans = 19;
+  unlocked.inventory.cans = 199;
   const refilled = stepGame(unlocked, 1, () => 1);
-  assert.equal(refilled.inventory.cans, 69);
+  assert.equal(refilled.inventory.cans, 399);
   assert.equal(refilled.coins, 100);
-  const poor = { ...refilled, coins: 99, inventory: { ...refilled.inventory, cans: 10 } };
+  const poor = { ...refilled, coins: 399, inventory: { ...refilled.inventory, cans: 100 } };
   const unchanged = stepGame(poor, 1, () => 1);
-  assert.equal(unchanged.inventory.cans, 10);
-  assert.equal(unchanged.coins, 99);
+  assert.equal(unchanged.inventory.cans, 100);
+  assert.equal(unchanged.coins, 399);
 });
 
 test("processing reserves raw and advances the current plot batch", () => {
@@ -183,21 +189,12 @@ test("saved transient drag state is recovered safely", async () => {
   assert.deepEqual(restored.plots.map((plot) => plot.purchasePrice), [1200, 1200, 300]);
 });
 
-test("buying plots and rebirth potions uses the configured prices", () => {
+test("buying plots uses the configured price", () => {
   const game = state();
   game.coins = 500;
   const withPlot = buyPlot(game, { id: "new-zone", type: "living", name: "生活区", x: 300, y: 300, cols: 4, rows: 4, purchasePrice: 0 });
   assert.equal(withPlot.coins, 200);
   assert.equal(withPlot.plots.length, 4);
-  const withPotion = buyRebirthPotion(withPlot);
-  assert.equal(withPotion.coins, 0);
-  assert.equal(withPotion.inventory.potions, 1);
-  const reborn = applyRebirth(withPotion, "worker-1", { stamina: 10, efficiency: 1, spirit: 8 });
-  assert.equal(reborn.inventory.potions, 0);
-  assert.deepEqual(
-    [reborn.workers[0].stamina, reborn.workers[0].efficiency, reborn.workers[0].spirit],
-    [10, 1, 8],
-  );
 });
 
 test("new workers respect living plot capacity and can use the next living plot", () => {
@@ -233,7 +230,26 @@ test("scheduler purchase lasts 60 simulated seconds", () => {
   const active = buyScheduler(game);
   assert.equal(active.coins, 0);
   assert.equal(active.schedulerSeconds, 60);
+  assert.equal(active.schedulerServiceUnlocked, true);
   assert.equal(stepGame(active, 1).schedulerSeconds, 59);
+});
+
+test("automatic scheduler supply unlocks once and buys 180 seconds below 180", () => {
+  const game = state();
+  game.coins = 5400;
+  game.schedulerSeconds = 180;
+  const unlocked = buyAutoSchedulerSupply(game);
+  assert.equal(unlocked.coins, 400);
+  assert.equal(unlocked.autoSchedulerSupply, true);
+  assert.equal(unlocked.schedulerServiceUnlocked, true);
+  assert.equal(buyAutoSchedulerSupply(unlocked), unlocked);
+  const refilled = stepGame(unlocked, 1);
+  assert.equal(refilled.schedulerSeconds, 359);
+  assert.equal(refilled.coins, 100);
+  const poor = { ...refilled, coins: 299, schedulerSeconds: 100 };
+  const unchanged = stepGame(poor, 1);
+  assert.equal(unchanged.schedulerSeconds, 99);
+  assert.equal(unchanged.coins, 299);
 });
 
 test("additional scheduler robots cost 1000 coins and persist", () => {
@@ -268,12 +284,12 @@ test("can opener boosts only living recovery by 50 percent and has a five minute
 });
 
 test("each scheduler robot can upgrade speed and interval independently", () => {
-  const efficiencyGame = state();
+  const efficiencyGame = buySchedulerBot({ ...state(), coins: 1000 });
   efficiencyGame.coins = 100;
   const faster = upgradeSchedulerEfficiency(efficiencyGame, 0);
   assert.equal(faster.coins, 0);
   assert.equal(faster.schedulerRobots[0].efficiency, 1.01);
-  const intervalGame = state();
+  const intervalGame = buySchedulerBot({ ...state(), coins: 1000 });
   intervalGame.coins = 100;
   const shorter = upgradeSchedulerInterval(intervalGame, 0);
   assert.equal(shorter.coins, 0);
@@ -308,7 +324,7 @@ test("ready workers are distributed to the least occupied work plot", () => {
 });
 
 test("scheduler duties can be assigned per robot and wake slacking workers in place", () => {
-  const game = state();
+  const game = buySchedulerBot({ ...state(), coins: 1000 });
   game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "slacking", mood: 80 };
   const wakeOnly = { rest: false, work: false, wake: true };
   assert.deepEqual(chooseAutoDispatch(game, [], [], wakeOnly), { workerId: "worker-1", targetId: "gather", action: "wake" });
@@ -333,31 +349,33 @@ test("empty plots recycle for 70 percent while every zone type keeps one plot", 
   assert.equal(withoutInitialGather.coins, 1050);
 });
 
-test("version one saves migrate plots, potions and movement state", async () => {
+test("version one saves migrate plots, automation and movement state", async () => {
   const { parseSavedState } = await import("../app/game-engine.ts");
   const old = state();
   old.version = 1;
   delete old.plots;
-  delete old.inventory.potions;
   delete old.schedulerBots;
   delete old.schedulerRobots;
   delete old.canOpenerSeconds;
   delete old.canOpenerCooldown;
   delete old.autoCanSupply;
+  delete old.autoSchedulerSupply;
+  delete old.schedulerServiceUnlocked;
   old.recipe = "refined";
   old.recipeProduced = 6;
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 4);
+  assert.equal(migrated.version, 6);
   assert.equal(migrated.plots.length, 3);
-  assert.equal(migrated.inventory.potions, 0);
   assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
   assert.deepEqual(migrated.schedulerRobots, [{ efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } }]);
   assert.equal(migrated.canOpenerSeconds, 0);
   assert.equal(migrated.canOpenerCooldown, 0);
   assert.equal(migrated.autoCanSupply, false);
+  assert.equal(migrated.autoSchedulerSupply, false);
+  assert.equal(migrated.schedulerServiceUnlocked, false);
   assert.deepEqual(migrated.processPlots.process, {
     recipe: "refined",
     produced: 6,
