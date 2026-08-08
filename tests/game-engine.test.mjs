@@ -1,26 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  SPECIAL_DROP_CHANCE,
+  SYNTHESIS_RECIPES,
   buyAutoCanSupply,
   buyAutoSchedulerSupply,
-  buyCanOpener,
+  buyResearch,
   buyScheduler,
   buySchedulerBot,
   buyWorker,
   buyPlot,
   changeRecipe,
+  changeSynthesisRecipe,
   chooseAutoDispatch,
   createInitialState,
   gatherAttributeRate,
+  nextPlotPrice,
+  orderCoinReward,
+  placeHolyLight,
   randomMarketPrice,
   plotPurchasePrice,
   recyclePlot,
   recoveryRate,
+  schedulerBotPrice,
   staminaDrainRate,
   stepGame,
+  submitOrder,
+  togglePlotEnabled,
   toggleSchedulerDuty,
   upgradeSchedulerEfficiency,
   upgradeSchedulerInterval,
+  useSpecialItem,
+  workerPurchasePrice,
 } from "../app/game-engine.ts";
 import { simulateElapsed } from "../app/simulation-protocol.ts";
 import { SCENE_DRAG_Z, sceneDepth } from "../app/scene-depth.ts";
@@ -262,21 +273,17 @@ test("additional scheduler robots cost 1000 coins and persist", () => {
   assert.equal(stepGame(upgraded, 1).schedulerBots, 2);
 });
 
-test("can opener boosts only living recovery by 50 percent and has a five minute cooldown", () => {
+test("stored can opener boosts only living recovery for 120 seconds", () => {
   const game = state();
-  game.coins = 300;
+  game.inventory.specials.canOpener = 1;
   game.workers[0].mood = 90;
-  const active = buyCanOpener(game);
-  assert.equal(active.coins, 0);
-  assert.equal(active.canOpenerSeconds, 60);
-  assert.equal(active.canOpenerCooldown, 300);
+  const active = useSpecialItem(game, "canOpener");
+  assert.equal(active.inventory.specials.canOpener, 0);
+  assert.equal(active.effects.canOpener, 120);
   const recovered = stepGame(active, 1);
   assert.equal(recovered.workers[0].mood, 93);
   assert.equal(recovered.inventory.cans, 19.99);
-  assert.equal(recovered.canOpenerSeconds, 59);
-  assert.equal(recovered.canOpenerCooldown, 299);
-  const cooling = { ...recovered, coins: 300 };
-  assert.equal(buyCanOpener(cooling), cooling);
+  assert.equal(recovered.effects.canOpener, 119);
   const working = { ...active, workers: [{ ...active.workers[0], zoneId: "gather", status: "idle", mood: 100 }] };
   const worked = stepGame(working, 1, () => 1);
   assert.equal(worked.inventory.raw, 10);
@@ -366,7 +373,7 @@ test("version one saves migrate plots, automation and movement state", async () 
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 6);
+  assert.equal(migrated.version, 7);
   assert.equal(migrated.plots.length, 3);
   assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
@@ -382,4 +389,148 @@ test("version one saves migrate plots, automation and movement state", async () 
     batch: { active: true, progress: .5, reservedRaw: 200 },
   });
   assert.deepEqual(migrated.plots.map((plot) => plot.purchasePrice), [1200, 1200, 300]);
+});
+
+test("resource zones spawn every 180 seconds and boost gathering at the plot center", () => {
+  let game = state();
+  game.environment.spawnElapsed = 179;
+  game = stepGame(game, 1, () => .1);
+  assert.equal(game.environment.zones.length, 1);
+  assert.ok(game.environment.zones[0].duration >= 150 && game.environment.zones[0].duration <= 500);
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
+  game.environment.zones = [{ id: "bonus", x: 496, y: 386, radius: 12, bonus: .3, remaining: 100, duration: 100, meteor: false }];
+  const boosted = stepGame(game, 1, () => 1);
+  assert.equal(boosted.inventory.raw, 13);
+});
+
+test("meteor impact damages intersecting plots and knocks workers unconscious", () => {
+  const game = state();
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
+  game.environment.zones = [{ id: "impact", x: 496, y: 386, radius: 12, bonus: .5, remaining: .5, duration: 200, meteor: true }];
+  const hit = stepGame(game, 1, () => 1);
+  assert.equal(hit.plots.find((plot) => plot.id === "gather").damagedRemaining, 300);
+  assert.equal(hit.workers[0].status, "unconscious");
+  assert.equal(hit.workers[0].recoveryRemaining, 180);
+  assert.equal(hit.environment.craters[0].remaining, 600);
+  assert.equal(hit.environment.craters[0].radius, 12);
+});
+
+test("meteor impact never expands beyond its resource zone", () => {
+  const game = state();
+  game.environment.zones = [{ id: "edge-impact", x: 1640, y: 386, radius: 12, bonus: .5, remaining: .5, duration: 200, meteor: true }];
+  const hit = stepGame(game, 1, () => 1);
+  assert.equal(hit.plots.find((plot) => plot.id === "gather").damagedRemaining, 0);
+});
+
+test("unconscious workers recover only while assigned to a living plot", () => {
+  const game = state();
+  game.workers[0] = { ...game.workers[0], status: "unconscious", recoveryRemaining: 1, mood: 0 };
+  const recovered = stepGame(game, 1);
+  assert.equal(recovered.workers[0].status, "ready");
+  assert.equal(recovered.workers[0].mood, 100);
+  assert.equal(recovered.inventory.cans, 20);
+});
+
+test("synthesis batches reserve ingredients, produce cans and refund on recipe changes", () => {
+  let game = state();
+  game.coins = 300;
+  game = buyPlot(game, { id: "synth", type: "synthesis", name: "合成区", x: 0, y: 0, cols: 4, rows: 4, purchasePrice: 0 });
+  game.inventory.rough = 1;
+  game.inventory.refined = 1;
+  game.workers[0] = { ...game.workers[0], zoneId: "synth", status: "idle", mood: 100 };
+  let started = stepGame(game, 1, () => 1);
+  assert.equal(started.inventory.rough, 0);
+  assert.equal(started.synthesisPlots.synth.batch.active, true);
+  const refunded = changeSynthesisRecipe(started, "synth", "screws");
+  assert.equal(refunded.inventory.rough, 1);
+  assert.equal(refunded.inventory.refined, 1);
+  game.synthesisPlots.synth.batch = { active: true, progress: .99, reserved: { rough: 1, refined: 1 } };
+  game.inventory.rough = 0;
+  game.inventory.refined = 0;
+  const completed = stepGame(game, 1, () => 1);
+  assert.equal(completed.inventory.cans, 40);
+});
+
+test("synthesis recipes take three times their original duration", () => {
+  assert.deepEqual(Object.values(SYNTHESIS_RECIPES).map((recipe) => recipe.seconds), [60, 90, 135]);
+});
+
+test("disabled plots pause production and are ignored by automatic dispatch", () => {
+  let game = state();
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle", mood: 100 };
+  game = togglePlotEnabled(game, "gather");
+  const paused = stepGame(game, 1, () => 1);
+  assert.equal(paused.inventory.raw, 0);
+  assert.equal(paused.workers[0].status, "idle");
+  const ready = { ...paused, workers: [{ ...paused.workers[0], zoneId: "living", status: "ready", mood: 100 }] };
+  assert.notEqual(chooseAutoDispatch(ready, [], [], { rest: false, work: true, wake: false })?.targetId, "gather");
+});
+
+test("holy light is placed from inventory and doubles production without mood drain", () => {
+  const game = state();
+  game.inventory.specials.holyLight = 1;
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle", mood: 100 };
+  const lit = placeHolyLight(game, 496, 386);
+  const next = stepGame(lit, 1, () => 1);
+  assert.equal(next.inventory.raw, 20);
+  assert.equal(next.workers[0].mood, 100);
+  assert.equal(next.inventory.specials.holyLight, 0);
+});
+
+test("orders require manual delivery and pay the configured reward", () => {
+  const game = state();
+  game.inventory.rough = 5;
+  game.inventory.screws = 10;
+  game.orders = [{ id: "order-1", remaining: 300, processed: { kind: "rough", amount: 5 }, synthesized: { kind: "screws", amount: 10 }, reward: "coins" }];
+  assert.equal(orderCoinReward(game, game.orders[0]), 150);
+  const delivered = submitOrder(game, "order-1", () => 1);
+  assert.equal(delivered.inventory.rough, 0);
+  assert.equal(delivered.inventory.screws, 0);
+  assert.equal(delivered.coins, 250);
+  assert.equal(delivered.orders.length, 0);
+});
+
+test("orders dispatch every 180 seconds without probability and never exceed two", () => {
+  let game = state();
+  game.coins = 300;
+  game = buyPlot(game, { id: "synth-orders", type: "synthesis", name: "合成区", x: 0, y: 0, cols: 4, rows: 4, purchasePrice: 0 });
+  game.orderElapsed = 179;
+  game = stepGame(game, 1, () => .99);
+  assert.equal(game.orders.length, 1);
+  assert.equal(game.orderElapsed, 0);
+  game.orders = [game.orders[0], { ...game.orders[0], id: "order-2" }, { ...game.orders[0], id: "order-3" }];
+  game.orderElapsed = 179;
+  game = stepGame(game, 1, () => .99);
+  assert.equal(game.orders.length, 2);
+  assert.equal(game.orderElapsed, 180);
+});
+
+test("meteor crater special item chance is reduced below one percent", () => {
+  assert.equal(SPECIAL_DROP_CHANCE, .0025);
+  assert.ok(SPECIAL_DROP_CHANCE < .01);
+});
+
+test("expansion prices and permanent research scale without decreasing", () => {
+  const game = state();
+  assert.equal(workerPurchasePrice(0), 100);
+  assert.equal(workerPurchasePrice(25), 120);
+  assert.equal(nextPlotPrice(game, "gather", 4), 300);
+  game.plotPurchases.gather = 1;
+  assert.equal(nextPlotPrice(game, "gather", 4), 360);
+  assert.equal(nextPlotPrice(game, "gather", 8), 1430);
+  game.plotPurchases.gather = 5;
+  assert.equal(nextPlotPrice(game, "gather", 8), 2640);
+  game.plotPurchases.gather = 10;
+  assert.equal(nextPlotPrice(game, "gather", 8), 4800);
+  assert.equal(schedulerBotPrice(game), 1000);
+  game.schedulerBots = 2;
+  assert.equal(schedulerBotPrice(game), 1600);
+  game.schedulerBots = 6;
+  assert.equal(schedulerBotPrice(game), 4800);
+  game.schedulerBots = 11;
+  assert.equal(schedulerBotPrice(game), 11500);
+  game.coins = 10_000;
+  const researched = buyResearch(game, "radar");
+  assert.equal(researched.coins, 0);
+  assert.equal(researched.research.radar, 1);
 });

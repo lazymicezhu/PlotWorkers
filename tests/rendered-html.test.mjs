@@ -25,6 +25,11 @@ test("server-renders the complete workshop scene", async () => {
   assert.match(html, /采集区/);
   assert.match(html, /加工区/);
   assert.match(html, /生活区/);
+  assert.match(html, /螺丝\/钢筋/);
+  assert.match(html, /class="event-dock is-open"/);
+  assert.match(html, /下一资源区/);
+  assert.match(html, /订单/);
+  assert.match(html, /背包/);
   assert.match(html, /人物管理/);
   assert.doesNotMatch(html, /机器人管理/);
   assert.match(html, /机器人时间\/数量/);

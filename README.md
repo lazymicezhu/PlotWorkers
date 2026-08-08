@@ -92,6 +92,11 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
+## Game Design Documents
+
+- [当前玩法说明](docs/当前玩法说明.md)
+- [经济、出售、商店与订单数值策划](docs/经济与订单数值策划.md)
+
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
