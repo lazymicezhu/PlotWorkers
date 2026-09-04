@@ -12,6 +12,7 @@ import {
   buyPlot,
   changeRecipe,
   changeSynthesisRecipe,
+  circleHitsPlot,
   chooseAutoDispatch,
   createInitialState,
   gatherAttributeRate,
@@ -401,6 +402,22 @@ test("resource zones spawn every 180 seconds and boost gathering at the plot cen
   game.environment.zones = [{ id: "bonus", x: 496, y: 386, radius: 12, bonus: .3, remaining: 100, duration: 100, meteor: false }];
   const boosted = stepGame(game, 1, () => 1);
   assert.equal(boosted.inventory.raw, 13);
+});
+
+test("a circle touching only the middle of a plot edge still grants its bonus", () => {
+  let game = state();
+  const gather = game.plots.find((plot) => plot.id === "gather");
+  const radius = 4;
+  const edgeMidpoint = { x: 704, y: 278 };
+  const offset = radius * 52 * .98 / Math.sqrt(2);
+  const circleX = edgeMidpoint.x + offset;
+  const circleY = (edgeMidpoint.y * 52 / 27 - offset) * 27 / 52;
+  assert.equal(circleHitsPlot(circleX, circleY, radius, gather), true);
+
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
+  game.environment.zones = [{ id: "edge-bonus", x: circleX, y: circleY, radius, bonus: .3, remaining: 100, duration: 100, meteor: false }];
+  game = stepGame(game, 1, () => 1);
+  assert.equal(game.inventory.raw, 13);
 });
 
 test("meteor impact damages intersecting plots and knocks workers unconscious", () => {

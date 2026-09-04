@@ -632,10 +632,20 @@ export function circleHitsPlot(x: number, y: number, radius: number, plot: PlotS
     { x: center.x, y: plot.y + plot.rows * 54 },
     { x: plot.x, y: center.y },
   ];
-  return vertices.some((point) => distance(point, { x, y }) <= r) || distance(center, { x, y }) <= r;
+  const scaleY = EVENT_GRID / 27;
+  const circle = { x, y: y * scaleY };
+  const scaledVertices = vertices.map((point) => ({ x: point.x, y: point.y * scaleY }));
+  const distanceToEdge = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    const edgeX = end.x - start.x;
+    const edgeY = end.y - start.y;
+    const lengthSquared = edgeX * edgeX + edgeY * edgeY;
+    const projection = lengthSquared === 0 ? 0 : ((circle.x - start.x) * edgeX + (circle.y - start.y) * edgeY) / lengthSquared;
+    const clamped = Math.max(0, Math.min(1, projection));
+    return Math.hypot(circle.x - (start.x + edgeX * clamped), circle.y - (start.y + edgeY * clamped));
+  };
+  return scaledVertices.some((start, index) => distanceToEdge(start, scaledVertices[(index + 1) % scaledVertices.length]) <= r);
 }
 
-const inTimedCircle = (plot: PlotState, circle: { x: number; y: number } | null, radius: number) => Boolean(circle && distance(plotCenter(plot), circle) <= radius * EVENT_GRID);
 const randomSpecial = (random: () => number): SpecialItemId => (["canOpener", "smartLeader", "holyLight"] as SpecialItemId[])[Math.min(2, Math.floor(random() * 3))];
 
 function createOrder(state: GameState, random: () => number): OrderState {
@@ -765,7 +775,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const plotById = new Map(plots.map((plot) => [plot.id, plot]));
   const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
   const workZones: ZoneType[] = ["gather", "process", "synthesis"];
-  const holyPlot = (plot: PlotState) => inTimedCircle(plot, effects.holyLight, 8);
+  const holyPlot = (plot: PlotState) => Boolean(effects.holyLight && circleHitsPlot(effects.holyLight.x, effects.holyLight.y, 8, plot));
   for (const worker of workers) {
     if (worker.status === "dragging") continue;
     const plot = worker.zoneId ? plotById.get(worker.zoneId) : undefined;
@@ -813,7 +823,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const holy = holyPlot(plot);
     if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100);
     if (worker.status !== "slacking") {
-      const resourceBonus = Math.max(0, ...environment.zones.filter((zone) => inTimedCircle(plot, zone, zone.radius)).map((zone) => zone.bonus));
+      const resourceBonus = Math.max(0, ...environment.zones.filter((zone) => circleHitsPlot(zone.x, zone.y, zone.radius, plot)).map((zone) => zone.bonus));
       const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * (1 + resourceBonus) * (holy ? 2 : 1);
       inventory.raw += 10 * rate * dt;
       worker.status = worker.mood <= 0 ? "exhausted" : "gathering";
@@ -844,7 +854,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += 1; plotState.produced += 1;
-        if (environment.craters.some((crater) => inTimedCircle(plot, crater, crater.radius)) && random() < SPECIAL_DROP_CHANCE) inventory.specials[randomSpecial(random)] += 1;
+        if (environment.craters.some((crater) => circleHitsPlot(crater.x, crater.y, crater.radius, plot)) && random() < SPECIAL_DROP_CHANCE) inventory.specials[randomSpecial(random)] += 1;
         if (inventory.raw >= recipe.raw) { inventory.raw -= recipe.raw; plotState.batch = { active: true, progress: overflow, reservedRaw: recipe.raw }; }
         else plotState.batch = { active: false, progress: 0, reservedRaw: 0 };
       }

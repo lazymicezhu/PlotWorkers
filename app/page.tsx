@@ -188,12 +188,6 @@ function plotCapacity(plot: PlotState) {
   return Math.floor(plot.cols * plot.rows / 4);
 }
 
-function plotCenterInCircle(plot: PlotState, circle: { x: number; y: number }, radius: number) {
-  const centerX = plot.x + plot.rows * TILE_W / 2;
-  const centerY = plot.y + plot.rows * TILE_H / 2;
-  return Math.hypot(centerX - circle.x, (centerY - circle.y) * TILE_W / TILE_H) <= radius * TILE_W / 2;
-}
-
 function diamond(plot: PlotState, padding = 0) {
   const cx = plot.x + plot.cols * TILE_W / 2;
   const cy = plot.y + plot.rows * TILE_H / 2;
@@ -989,9 +983,9 @@ export default function Home() {
           const valid = isPlacement ? placingPlot.valid : isMoving ? plotDraft.valid : true;
           const count = workerCountByPlot.get(plot.id) ?? 0;
           const operational = plot.enabled !== false && (plot.damagedRemaining ?? 0) <= 0;
-          const resourceBonus = operational && plot.type === "gather" && game.environment.zones.some((zone) => plotCenterInCircle(plot, zone, zone.radius));
-          const holyBonus = operational && plot.type !== "living" && Boolean(game.effects.holyLight && plotCenterInCircle(plot, game.effects.holyLight, 8));
-          const craterBonus = operational && plot.type === "process" && game.environment.craters.some((crater) => plotCenterInCircle(plot, crater, crater.radius));
+          const resourceBonus = operational && plot.type === "gather" && game.environment.zones.some((zone) => circleHitsPlot(zone.x, zone.y, zone.radius, plot));
+          const holyBonus = operational && plot.type !== "living" && Boolean(game.effects.holyLight && circleHitsPlot(game.effects.holyLight.x, game.effects.holyLight.y, 8, plot));
+          const craterBonus = operational && plot.type === "process" && game.environment.craters.some((crater) => circleHitsPlot(crater.x, crater.y, crater.radius, plot));
           return <section
             className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${(plot.damagedRemaining ?? 0) > 0 ? "is-damaged" : ""} ${resourceBonus ? "has-resource-bonus" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${craterBonus ? "has-crater-bonus" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
             key={plot.id}
@@ -1000,7 +994,7 @@ export default function Home() {
             <div className="plot-shadow" />
             <div className="plot-base" aria-hidden="true"><span className="base-left" /><span className="base-right" /></div>
             <PlotSurface plot={plot} />
-            {(resourceBonus || holyBonus || craterBonus) && <div className="plot-bonus-tags" aria-label="当前地块加成">{resourceBonus && <span className="is-resource">高资源</span>}{holyBonus && <span className="is-holy">圣光</span>}{craterBonus && <span className="is-crater">特殊掉落</span>}</div>}
+            {(resourceBonus || holyBonus || craterBonus) && <div className="plot-bonus-effect" aria-label="当前地块加成"><div className="plot-bonus-ripples" aria-hidden="true"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg></div><div className="plot-bonus-labels">{resourceBonus && <span>高资源</span>}{holyBonus && <span>圣光</span>}{craterBonus && <span>特殊掉落</span>}</div></div>}
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && (plot.damagedRemaining ?? 0) <= 0 && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
             <div className="zone-sign"><strong>{(plot.damagedRemaining ?? 0) > 0 ? "废墟重建中" : plot.name}</strong><span>{(plot.damagedRemaining ?? 0) > 0 ? `${Math.ceil(plot.damagedRemaining ?? 0)}s` : `${plot.cols}×${plot.rows} · ${count}/${plotCapacity(plot)}人${plot.enabled === false ? " · 已停用" : ""}`}</span></div>

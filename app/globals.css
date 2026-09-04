@@ -748,13 +748,14 @@ button { font: inherit; }
 .plot-enabled-toggle input { width: 13px; height: 13px; accent-color: #58765d; }
 .plot-management-row.is-disabled { opacity: .58; }
 
-.plot-bonus-tags { --bonus-color: rgba(92,165,83,.62); position: absolute; z-index: 80; inset: 0 0 auto; width: var(--plot-width); height: var(--plot-height); display: flex; align-items: flex-start; justify-content: flex-end; gap: 4px; padding: 12% 15%; clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%); background: radial-gradient(ellipse at center, transparent 47%, var(--bonus-color) 66%, transparent 69%); animation: plot-bonus-pulse 1.15s ease-in-out infinite alternate; pointer-events: none; }
-.plot.has-holy-bonus .plot-bonus-tags { --bonus-color: rgba(236,195,64,.76); }
-.plot.has-crater-bonus:not(.has-holy-bonus) .plot-bonus-tags { --bonus-color: rgba(119,91,145,.7); }
-.plot-bonus-tags span { padding: 3px 6px; border-radius: 99px; color: #fff; background: rgba(65,91,67,.86); box-shadow: 0 3px 8px rgba(38,50,41,.16); font-size: 8px; font-weight: 700; white-space: nowrap; }
-.plot-bonus-tags span.is-holy { background: #9c7b22; }
-.plot-bonus-tags span.is-crater { background: #695479; }
-@keyframes plot-bonus-pulse { to { opacity: .58; } }
+.plot-bonus-effect { position: absolute; z-index: 80; inset: 0 0 auto; width: var(--plot-width); height: var(--plot-height); pointer-events: none; }
+.plot-bonus-ripples { position: absolute; inset: 0; }
+.plot-bonus-ripples svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; transform-origin: 50% 50%; animation: plot-bonus-ripple 2.4s ease-out infinite; }
+.plot-bonus-ripples svg:nth-child(2) { animation-delay: -1.2s; }
+.plot-bonus-ripples polygon { fill: none; stroke: rgba(245,190,53,.88); stroke-width: 2.2; filter: drop-shadow(0 0 3px rgba(255,217,102,.72)); }
+.plot-bonus-labels { position: absolute; top: 10%; right: 12%; display: flex; gap: 4px; }
+.plot-bonus-labels span { padding: 3px 7px; border: 1px solid rgba(251,221,129,.78); border-radius: 99px; color: #fff8dd; background: rgba(111,82,22,.9); box-shadow: 0 3px 8px rgba(82,58,13,.2); font-size: 8px; font-weight: 700; white-space: nowrap; }
+@keyframes plot-bonus-ripple { 0% { opacity: .88; transform: scale(.985); } 72% { opacity: .3; } 100% { opacity: 0; transform: scale(1.14); } }
 
 @media (max-width: 760px) {
   .hud { left: 10px; right: 10px; max-width: none; overflow-x: auto; transform: none; }
