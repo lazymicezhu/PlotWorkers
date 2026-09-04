@@ -1,103 +1,96 @@
-# vinext-starter
+# Plot Workers
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+[中文说明](./README.zh-CN.md)
 
-## Prerequisites
+Plot Workers is an incremental management game about building production chains on a growing collection of plots. Recruit workers with different personalities, assign them to gather, process, synthesize, or rest, then reinvest the proceeds in new land, automation, robots, and permanent research.
 
-- Node.js `>=22.13.0`
+## Features
 
-## Quick Start
+- A complete gather → process → synthesize → sell/order production loop
+- Drag-and-drop worker assignment and movable isometric plots
+- Worker mood, attributes, personalities, rest, and recovery
+- Per-plot recipes, batch production, market prices, and timed orders
+- Robot dispatch automation and permanent research upgrades
+- Resource zones, meteor strikes, ruins, and special items
+- Versioned local saves with no account required
+
+## How to play
+
+1. Drag workers onto gathering plots to produce raw materials.
+2. Move them to processing and synthesis plots to create products.
+3. Sell products or deliver orders to earn coins.
+4. Send tired or injured workers to living plots.
+5. Expand with more workers, plots, robots, and research.
+
+Drag an empty part of the scene to move the camera. Use the mouse wheel or the `+` and `-` keys to zoom. Press and drag a plot to reposition it.
+
+## Local development
+
+Requirements: Node.js 22.13 or newer and npm.
 
 ```bash
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+Useful commands:
 
-## Included Shape
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the local development server |
+| `npm run build` | Create a production build |
+| `npm test` | Build and run the automated tests |
+| `npm run lint` | Run the code quality checks |
+| `npm run deploy` | Build and deploy to Cloudflare Workers |
+| `npm run deploy:preview` | Build and upload a preview Worker version |
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+## Deploy to Cloudflare Workers
 
-## Workspace Auth Headers
+Cloudflare Workers is the recommended deployment target. The project uses Vinext with React Server Components and produces a Worker entry point together with its static assets.
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+### Deploy from your computer
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
+Authenticate once, then deploy:
 
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+npx wrangler login
+npm run deploy
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+Wrangler creates or updates the `plot-workers` Worker and prints its `workers.dev` URL. Custom domains can be added later from the Worker settings in the Cloudflare dashboard.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+### Automatic deployment from GitHub
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+1. Push the repository to GitHub.
+2. In Cloudflare, open **Workers & Pages**, choose **Create application**, then import the repository.
+3. Use the following build settings:
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+| Setting | Value |
+| --- | --- |
+| Root directory | `/` |
+| Production branch | `main` |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy --config dist/server/wrangler.json` |
+| Non-production deploy command | `npx wrangler versions upload --config dist/server/wrangler.json` |
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+Cloudflare Workers Builds can manage its deployment token. If you use GitHub Actions instead, store `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets—never commit them.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+See the official [Cloudflare Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) and [Vinext deployment guide](https://github.com/cloudflare/vinext#deployment) for additional options.
 
-## Useful Commands
+## What about Cloudflare Pages?
 
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+The current project should not be uploaded to Pages unchanged: its build output includes a server-side Worker. Pages is suitable only after a separate static-export conversion, including removing Worker-only code, verifying the simulation worker bundle, and producing a static output directory such as `out`.
 
-## Game Design Documents
+If a fully static edition is needed, follow Cloudflare's [Next.js static export guide](https://developers.cloudflare.com/pages/framework-guides/nextjs/deploy-a-static-nextjs-site/) after completing that conversion. For the current codebase, Workers is the direct and supported route.
 
-- [当前玩法说明](docs/当前玩法说明.md)
-- [经济、出售、商店与订单数值策划](docs/经济与订单数值策划.md)
+## Data and privacy
 
-## Learn More
+- Game progress and display preferences are stored locally in the browser.
+- The game does not require an account and does not include analytics or telemetry.
+- Simulation pauses while the page is hidden; there are no offline earnings.
+- Local environment files, deployment state, logs, and credentials are excluded from Git.
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+## Design documents
+
+- [Current gameplay specification (Chinese)](./docs/%E5%BD%93%E5%89%8D%E7%8E%A9%E6%B3%95%E8%AF%B4%E6%98%8E.md)
+- [Economy and order balancing (Chinese)](./docs/%E7%BB%8F%E6%B5%8E%E4%B8%8E%E8%AE%A2%E5%8D%95%E6%95%B0%E5%80%BC%E7%AD%96%E5%88%92.md)

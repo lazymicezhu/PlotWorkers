@@ -20,8 +20,8 @@ test("server-renders the complete workshop scene", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>绿野工坊 · 采集加工经营<\/title>/);
-  assert.match(html, /绿野工坊/);
+  assert.match(html, /<title>Plot Workers · 增量工坊经营<\/title>/);
+  assert.match(html, /Plot Workers/);
   assert.match(html, /采集区/);
   assert.match(html, /加工区/);
   assert.match(html, /生活区/);

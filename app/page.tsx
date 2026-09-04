@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Game art uses authored local bitmaps with fixed rendering behavior. */
+
 import {
   CSSProperties,
   KeyboardEvent,
@@ -47,7 +49,6 @@ import {
   orderCoinReward,
   parseSavedState,
   placeHolyLight,
-  plotPurchasePrice,
   recyclePlot,
   reinforcePlot,
   schedulerBotPrice,
@@ -57,7 +58,7 @@ import {
   toggleSchedulerDuty,
   upgradeSchedulerEfficiency,
   upgradeSchedulerInterval,
-  useSpecialItem,
+  useSpecialItem as consumeSpecialItem,
   workerPurchasePrice,
 } from "./game-engine";
 import { simulateElapsed } from "./simulation-protocol";
@@ -345,6 +346,8 @@ export default function Home() {
   useEffect(() => {
     const saved = parseSavedState(localStorage.getItem(SAVE_KEY));
     if (saved) {
+      // Restore browser-only state after hydration; synchronous restoration is intentional.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGame(saved);
       setSelectedId(saved.workers[0]?.id ?? null);
     }
@@ -441,6 +444,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const autoFinishTimers = autoFinishTimersRef.current;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         for (let botIndex = 0; botIndex < gameRef.current.schedulerBots; botIndex += 1) startAutoDispatch(botIndex);
@@ -448,9 +452,11 @@ export default function Home() {
     }, 400);
     return () => {
       window.clearInterval(timer);
-      autoFinishTimersRef.current.forEach((finishTimer) => window.clearTimeout(finishTimer));
-      autoFinishTimersRef.current.clear();
+      autoFinishTimers.forEach((finishTimer) => window.clearTimeout(finishTimer));
+      autoFinishTimers.clear();
     };
+    // Dispatch reads current game state from refs; rerunning this timer on each render is unnecessary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -466,6 +472,8 @@ export default function Home() {
     if (!worker) return;
     const position = plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y };
     const next = { x: (WORLD_W / 2 - position.x) * zoom, y: (WORLD_H / 2 - position.y) * zoom };
+    // Camera tracking is derived from the latest animated worker position.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCamera((current) => current.x === next.x && current.y === next.y ? current : next);
   }, [trackedId, draggingId, panning, game.workers, displayPlots, zoom]);
 
@@ -913,7 +921,7 @@ export default function Home() {
       setNotice("单击空白区域放置圣光洗礼");
       return;
     }
-    updateGame((current) => useSpecialItem(current, id));
+    updateGame((current) => consumeSpecialItem(current, id));
     setNotice(`${SPECIAL_ITEM_NAMES[id]}已生效120秒`);
   }
 
@@ -962,7 +970,7 @@ export default function Home() {
       tabIndex={0}
     >
       <header className="hud" onPointerDown={(event) => event.stopPropagation()}>
-        <div className="brand-chip">绿野工坊</div>
+        <div className="brand-chip">Plot Workers</div>
         <Resource label="金币" value={game.coins} accent />
         <Resource label="原料" value={game.inventory.raw} warning={game.inventory.raw <= 0} />
         <Resource label="罐头" value={game.inventory.cans} warning={game.inventory.cans < 20} />

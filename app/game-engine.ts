@@ -890,7 +890,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
   }
 
-  let orders = state.orders.map((order) => ({ ...order, remaining: order.remaining - dt })).filter((order) => order.remaining > 0).slice(0, 2);
+  const orders = state.orders.map((order) => ({ ...order, remaining: order.remaining - dt })).filter((order) => order.remaining > 0).slice(0, 2);
   let orderElapsed = Math.min(180, state.orderElapsed + dt);
   let orderSerial = state.orderSerial;
   if (orderElapsed >= 180 && plots.some((plot) => plot.type === "synthesis") && orders.length < 2) {
@@ -1023,7 +1023,9 @@ export function parseSavedState(value: string | null): GameState | null {
         refinedPrice: Math.round(parsed.market.refinedPrice),
       },
       workers: parsed.workers.map((worker) => {
-        const { moving: _moving, motion: _motion, ...rest } = worker as WorkerState & { moving?: boolean; motion?: string };
+        const rest = { ...worker } as WorkerState & { moving?: boolean; motion?: string };
+        delete rest.moving;
+        delete rest.motion;
         return {
           ...rest,
           lastWorkZoneId: worker.lastWorkZoneId ?? null,

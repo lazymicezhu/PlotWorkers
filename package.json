@@ -1,6 +1,7 @@
 {
-  "name": "site-creator-vinext-starter",
+  "name": "plot-workers",
   "version": "0.1.0",
+  "description": "An incremental factory game about plots, workers, and production chains.",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -11,7 +12,9 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "deploy": "npm run build && WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy --config dist/server/wrangler.json",
+    "deploy:preview": "npm run build && WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler versions upload --config dist/server/wrangler.json"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
