@@ -66,6 +66,8 @@ import type { SimulationStepRequest, SimulationStepResponse } from "./simulation
 import SimulationWorker from "./simulation.worker?worker";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
 import { BatchProgressBackground } from "./batch-progress";
+import { SAVE_BACKUP_KEY, SettingsDialog } from "./settings-dialog";
+import { exportGameSave } from "./save-file";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -99,6 +101,7 @@ type AutoTransfer = {
 
 type PendingSimulation = {
   id: number;
+  epoch: number;
   base: GameState;
   seconds: number;
 };
@@ -251,6 +254,8 @@ export default function Home() {
   const simulationWorkerRef = useRef<Worker | null>(null);
   const pendingSimulationRef = useRef<PendingSimulation | null>(null);
   const simulationRequestIdRef = useRef(0);
+  const simulationEpochRef = useRef(0);
+  const simulationLastTimeRef = useRef(0);
   const unsimulatedSecondsRef = useRef(0);
   const [game, setGame] = useState<GameState>(() => createInitialState(initialPoint.x, initialPoint.y));
   const gameRef = useRef(game);
@@ -271,6 +276,8 @@ export default function Home() {
   const [placingHoly, setPlacingHoly] = useState(false);
   const [holyPreview, setHolyPreview] = useState<{ x: number; y: number } | null>(null);
   const [resetArmed, setResetArmed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [worldRevision, setWorldRevision] = useState(0);
   const [notice, setNotice] = useState("");
   const [builderType, setBuilderType] = useState<ZoneType>("gather");
   const [builderSize, setBuilderSize] = useState<4 | 8>(4);
@@ -335,6 +342,7 @@ export default function Home() {
       if (event.data.type !== "stepped" || !pending || event.data.id !== pending.id) return;
       startTransition(() => {
         setGame((current) => {
+          if (pending.epoch !== simulationEpochRef.current) return current;
           pendingSimulationRef.current = null;
           const next = reconcileSimulation(pending.base, current, event.data.state, pending.seconds);
           unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
@@ -375,11 +383,11 @@ export default function Home() {
   }, [zoom]);
 
   useEffect(() => {
-    let last = performance.now();
+    simulationLastTimeRef.current = performance.now();
     const timer = window.setInterval(() => {
       const now = performance.now();
       if (document.visibilityState === "visible") {
-        const elapsed = Math.min(5, (now - last) / 1000);
+        const elapsed = Math.min(5, (now - simulationLastTimeRef.current) / 1000);
         unsimulatedSecondsRef.current = Math.min(5, unsimulatedSecondsRef.current + elapsed);
         const worker = simulationWorkerRef.current;
         if (worker && !pendingSimulationRef.current) {
@@ -390,19 +398,21 @@ export default function Home() {
             state: gameRef.current,
             seconds: unsimulatedSecondsRef.current,
           };
-          pendingSimulationRef.current = { id, base: gameRef.current, seconds: request.seconds };
+          pendingSimulationRef.current = { id, epoch: simulationEpochRef.current, base: gameRef.current, seconds: request.seconds };
           worker.postMessage(request);
         } else if (!worker) {
           const seconds = unsimulatedSecondsRef.current;
+          const epoch = simulationEpochRef.current;
           startTransition(() => {
             setGame((current) => {
+              if (epoch !== simulationEpochRef.current) return current;
               unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - seconds);
               return simulateElapsed(current, seconds);
             });
           });
         }
       }
-      last = now;
+      simulationLastTimeRef.current = now;
     }, 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -798,6 +808,7 @@ export default function Home() {
       autoCooldownRef.current[botIndex] = Date.now() + 800;
       return;
     }
+    const epoch = simulationEpochRef.current;
     const sourcePlot = current.plots.find((plot) => plot.id === worker.zoneId);
     const from = sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y };
     const u = decision!.action === "wake" ? worker.u : .75 + Math.random() * Math.max(.5, target.cols - 1.5);
@@ -808,9 +819,14 @@ export default function Home() {
     const transfer: AutoTransfer = { botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, action: decision!.action };
     setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker!.id ? { ...item, status: "dragging" } : item) }));
     replaceAutoTransfers((transfers) => [...transfers, transfer]);
-    window.requestAnimationFrame(() => replaceAutoTransfers((transfers) => transfers.map((value) => value.workerId === worker!.id ? { ...value, active: true } : value)));
+    window.requestAnimationFrame(() => {
+      if (epoch !== simulationEpochRef.current) return;
+      replaceAutoTransfers((transfers) => transfers.map((value) => value.workerId === worker!.id ? { ...value, active: true } : value));
+    });
     const finishTimer = window.setTimeout(() => {
+      if (epoch !== simulationEpochRef.current) return;
       setGame((state) => {
+        if (epoch !== simulationEpochRef.current) return state;
         const destination = state.plots.find((plot) => plot.id === target!.id);
         const source = state.plots.find((plot) => plot.id === worker!.zoneId);
         if (!destination) return state;
@@ -850,7 +866,7 @@ export default function Home() {
 
   function onPanDown(event: PointerEvent<HTMLElement>) {
     if (placingHoly) {
-      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel")) return;
+      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog")) return;
       event.preventDefault();
       event.stopPropagation();
       const point = positionInWorld(event.clientX, event.clientY);
@@ -865,7 +881,7 @@ export default function Home() {
       placePurchasedPlot(event.clientX, event.clientY);
       return;
     }
-    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel")) return;
+    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     panOrigin.current = { clientX: event.clientX, clientY: event.clientY, ...camera };
     setTrackedId(null);
@@ -929,6 +945,59 @@ export default function Home() {
     setNotice(`${SPECIAL_ITEM_NAMES[id]}已生效120秒`);
   }
 
+  function installGame(next: GameState) {
+    // Invalidate old-world responses, delayed robot transfers and drag handlers
+    // before replacing a save. They must never write into the imported world.
+    simulationEpochRef.current += 1;
+    pendingSimulationRef.current = null;
+    unsimulatedSecondsRef.current = 0;
+    simulationLastTimeRef.current = performance.now();
+    autoFinishTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    autoFinishTimersRef.current.clear();
+    autoCooldownRef.current = [];
+    replaceAutoTransfers(() => []);
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    draggingIdRef.current = null;
+    dragOrigin.current = null;
+    dragElementRef.current = null;
+    dragPositionRef.current = null;
+    plotDraftRef.current = null;
+    placingPlotRef.current = null;
+    hoveredWorkerRef.current = null;
+    movementCursorRef.current = 0;
+    gameRef.current = next;
+    setGame(next);
+    setWorldRevision((revision) => revision + 1);
+    setSelectedId(next.workers[0]?.id ?? null);
+    setSelectedProcessPlotId(next.plots.find((plot) => plot.type === "process")?.id ?? "");
+    setSelectedSynthesisPlotId(next.plots.find((plot) => plot.type === "synthesis")?.id ?? "");
+    setTrackedId(null);
+    setDraggingId(null);
+    setHoveredWorker(null);
+    setHoveredPlot(null);
+    setPlotDraft(null);
+    setPlacingPlot(null);
+    setOverRecycle(false);
+    setPanning(false);
+    setCamera({ x: 0, y: 0 });
+    setPanel(null);
+    setPlacingHoly(false);
+    setHolyPreview(null);
+    setResetArmed(false);
+  }
+
+  function importSave(next: GameState) {
+    const backup = exportGameSave(gameRef.current);
+    try {
+      localStorage.setItem(SAVE_BACKUP_KEY, backup);
+      localStorage.setItem(SAVE_KEY, JSON.stringify(next));
+    } catch {
+      throw new Error("浏览器无法保存存档，当前进度未替换。请先导出备份后重试。");
+    }
+    installGame(next);
+  }
+
   function resetGame() {
     if (!resetArmed) {
       setResetArmed(true);
@@ -937,12 +1006,7 @@ export default function Home() {
     }
     const fresh = createInitialState(initialPoint.x, initialPoint.y);
     localStorage.setItem(SAVE_KEY, JSON.stringify(fresh));
-    setGame(fresh);
-    setSelectedId("worker-1");
-    setPanel(null);
-    setPlacingHoly(false);
-    setHolyPreview(null);
-    setResetArmed(false);
+    installGame(fresh);
   }
 
   const renderedPlots = placingPlot ? [...displayPlots, placingPlot.plot] : displayPlots;
@@ -982,7 +1046,9 @@ export default function Home() {
         <Resource label="螺丝/钢筋" value={`${format(game.inventory.screws)}/${format(game.inventory.rebar)}`} />
         {game.schedulerBots > 0 && <Resource label="机器人时间/数量" value={`${Math.ceil(game.schedulerSeconds)}s/${game.schedulerBots}台`} warning={game.schedulerSeconds < 60} />}
         <button className="reset-button" onClick={resetGame}>{resetArmed ? "再次点击确认" : "重新开始"}</button>
+        <button className="settings-button" aria-label="设置与存档" title="设置与存档" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9.5 3-.5 2a7 7 0 0 0-1.8 1L5.3 5.4 3.2 9l1.5 1.4a7 7 0 0 0 0 2.2L3.2 14l2.1 3.6 1.9-.6a7 7 0 0 0 1.8 1l.5 2h4l.5-2a7 7 0 0 0 1.8-1l1.9.6 2.1-3.6-1.5-1.4a7 7 0 0 0 0-2.2L19.8 9l-2.1-3.6-1.9.6A7 7 0 0 0 14 5l-.5-2z"/><circle cx="11.5" cy="11.5" r="3"/></svg></button>
       </header>
+      {settingsOpen && <SettingsDialog game={game} onClose={() => setSettingsOpen(false)} onImport={importSave} />}
 
       <div className={`world ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, "--camera-x": `${camera.x}px`, "--camera-y": `${camera.y}px` } as CSSProperties}>
         {game.effects.holyLight && <div className="ground-event holy-zone" style={{ left: game.effects.holyLight.x - 8 * 52, top: game.effects.holyLight.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(game.effects.holyLight.remaining)}s</span></div>}
@@ -1032,7 +1098,7 @@ export default function Home() {
         <div className="dock-actions"><button onClick={() => setPanel("orders")} disabled={!game.plots.some((plot) => plot.type === "synthesis")}>订单 {game.orders.length}/2</button><button onClick={() => setPanel("inventory")}>背包 {Object.values(game.inventory.specials).reduce((sum, value) => sum + value, 0)}</button></div>
       </aside>
 
-      <WorkerManager workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={activeManager} coins={game.coins} robots={game.schedulerRobots} showRobots={game.schedulerServiceUnlocked} onSelect={trackWorker} onToggle={toggleManager} onTogglePlot={(plotId) => updateGame((current) => togglePlotEnabled(current, plotId))} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} />
+      <WorkerManager key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={activeManager} coins={game.coins} robots={game.schedulerRobots} showRobots={game.schedulerServiceUnlocked} onSelect={trackWorker} onToggle={toggleManager} onTogglePlot={(plotId) => updateGame((current) => togglePlotEnabled(current, plotId))} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} />
 
       {panel && <aside className={`floating-panel ${panel === "shop" ? "shop-panel" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
         <button className="panel-close" onClick={() => { setPanel(null); cancelPurchasedPlot(); }} aria-label="关闭">×</button>
