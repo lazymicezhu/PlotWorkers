@@ -1,6 +1,6 @@
 # Plot Workers
 
-[中文说明](./README.md)
+[Play online](https://plotworkers.lazymicezhu.com/) · [中文说明](./README.md)
 
 Plot Workers is an incremental management game about building production chains on a growing collection of plots. Recruit workers with different personalities, assign them to gather, process, synthesize, or rest, then reinvest the proceeds in new land, automation, robots, and permanent research.
 

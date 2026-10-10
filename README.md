@@ -1,6 +1,6 @@
 # Plot Workers
 
-[English](./README.en.md)
+[在线体验](https://plotworkers.lazymicezhu.com/) · [English](./README.en.md)
 
 《Plot Workers》是一款以地块建设和工人调度为核心的增量经营游戏。购买并安排各具性格的小人，采集原料、加工产品、组装商品，再通过市场与订单赚取金币。扩建工坊、研究科技、部署机器人，不断优化生产链，把几块小小的土地发展成高效运转的工业世界。
 
