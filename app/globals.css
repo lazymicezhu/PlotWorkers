@@ -727,6 +727,7 @@ button { font: inherit; }
 .plot-management-group h3 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 4px; color: #405044; font-size: 12px; }
 .plot-management-group h3 span { color: #8a958d; font-size: 9px; font-weight: 500; }
 .plot-management-row { display: grid; grid-template-columns: minmax(82px,1fr) 76px 68px; align-items: center; gap: 6px; min-height: 48px; padding: 6px 0; border-bottom: 1px solid #edf0eb; }
+.plot-management-row.has-batch-progress { background: linear-gradient(90deg, rgba(99, 132, 88, .1) var(--batch-progress), transparent var(--batch-progress)); }
 .plot-management-row > div { display: flex; min-width: 0; flex-direction: column; }
 .plot-management-row strong { overflow: hidden; color: #3b493f; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .plot-management-row small { margin-top: 3px; overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
