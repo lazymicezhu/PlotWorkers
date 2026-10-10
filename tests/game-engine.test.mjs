@@ -532,6 +532,7 @@ test("orders require manual delivery and pay the configured reward", () => {
   assert.equal(delivered.inventory.rough, 0);
   assert.equal(delivered.inventory.screws, 0);
   assert.equal(delivered.coins, 625);
+  assert.deepEqual(delivered.inventory.specials, game.inventory.specials);
   assert.equal(delivered.orders.length, 0);
 });
 
@@ -583,15 +584,58 @@ test("orders dispatch every 180 seconds without probability and never exceed two
   assert.equal(game.orderElapsed, 180);
 });
 
-test("special items remain available as order rewards", () => {
+test("saved special orders pay 1.5 times the coin reward plus one item only once", async () => {
+  const { parseSavedState } = await import("../app/game-engine.ts");
   const game = state();
   game.inventory.rough = 5;
   game.inventory.screws = 10;
   game.orders = [{ id: "special-order", remaining: 300, processed: { kind: "rough", amount: 5 }, synthesized: { kind: "screws", amount: 10 }, reward: "special" }];
-  const delivered = submitOrder(game, "special-order", () => 1);
-  assert.equal(delivered.inventory.specials.holyLight, 1);
+  const restored = parseSavedState(JSON.stringify(game));
+  assert.equal(orderCoinReward(restored, { ...restored.orders[0], reward: "coins" }), 525);
+  assert.equal(orderCoinReward(restored, restored.orders[0]), 788);
+  const delivered = submitOrder(restored, "special-order", () => 1);
+  assert.equal(delivered.inventory.rough, 0);
+  assert.equal(delivered.inventory.screws, 0);
+  assert.deepEqual(delivered.inventory.specials, { ...game.inventory.specials, holyLight: 1 });
   assert.equal(delivered.orders.length, 0);
-  assert.equal(delivered.coins, game.coins);
+  assert.equal(delivered.coins, 888);
+  assert.equal(submitOrder(delivered, "special-order", () => 0), delivered);
+});
+
+test("special order coins track market and research bonuses with each reward rounded up", () => {
+  for (const [kind, amount, price, synthesized, research, standardReward, specialReward] of [
+    ["rough", 5, 8, "screws", 0, 510, 765],
+    ["rough", 1, 11, "screws", 0, 467, 701],
+    ["refined", 3, 33, "rebar", 2, 1079, 1619],
+  ]) {
+    const game = state();
+    game.market[`${kind}Price`] = price;
+    game.research.orders = research;
+    game.inventory[kind] = amount;
+    game.inventory[synthesized] = 10;
+    const standard = { id: "order", remaining: 300, processed: { kind, amount }, synthesized: { kind: synthesized, amount: 10 }, reward: "coins" };
+    const special = { ...standard, reward: "special" };
+    assert.equal(orderCoinReward(game, standard), standardReward);
+    assert.equal(orderCoinReward(game, special), specialReward);
+    const standardDelivery = submitOrder({ ...game, orders: [standard] }, standard.id);
+    const specialDelivery = submitOrder({ ...game, orders: [special] }, special.id, () => 0);
+    assert.equal(standardDelivery.coins - game.coins, standardReward);
+    assert.equal(specialDelivery.coins - game.coins, Math.ceil((standardDelivery.coins - game.coins) * 1.5));
+  }
+});
+
+test("special orders with missing products grant neither coins nor items", () => {
+  for (const missing of ["rough", "screws"]) {
+    const game = state();
+    game.inventory.rough = 5;
+    game.inventory.screws = 10;
+    game.inventory[missing] -= 1;
+    game.orders = [{ id: "special-order", remaining: 300, processed: { kind: "rough", amount: 5 }, synthesized: { kind: "screws", amount: 10 }, reward: "special" }];
+    const before = structuredClone(game);
+    const delivered = submitOrder(game, "special-order", () => assert.fail("unfulfilled orders must not draw an item"));
+    assert.equal(delivered, game);
+    assert.deepEqual(delivered, before);
+  }
 });
 
 test("expansion prices and permanent research scale without decreasing", () => {

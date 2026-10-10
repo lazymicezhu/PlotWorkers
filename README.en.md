@@ -10,8 +10,8 @@ Plot Workers is an incremental management game about building production chains 
 - Drag-and-drop worker assignment and movable isometric plots
 - Worker mood, attributes, personalities, and rest
 - Per-plot recipes, batch production, market prices, and timed orders
-- Robot dispatch automation and permanent upgrades for synthesis speed and coin order rewards
-- Special items earned from item-reward orders to boost production, robot transport, and mood recovery
+- Robot dispatch automation and permanent upgrades for synthesis speed and order coin rewards
+- Special orders that award extra coins plus items to boost production, robot transport, and mood recovery
 - Versioned local saves with no account required
 
 ## How to play
@@ -24,9 +24,9 @@ Plot Workers is an incremental management game about building production chains 
 
 Drag an empty part of the scene to move the camera. Use the mouse wheel or the `+` and `-` keys to zoom. Press and drag a plot to reposition it.
 
-Building a synthesis plot unlocks orders. A new order arrives every 180 seconds, with up to two active at once; deliver the required products manually to receive its displayed coin or special-item reward. Use special items from the backpack when needed.
+Building a synthesis plot unlocks orders. A new order arrives every 180 seconds, with up to two active at once; deliver the required products manually to receive its displayed rewards. Regular coin orders make up 75% of orders. The other 25% are special orders, which award 1.5 times the regular coin reward for the same products (rounded up), plus one random special item. Both order types calculate coins using market prices and research levels at delivery. Use special items from the backpack when needed.
 
-Permanent research includes Synthesis Engineering (+15% synthesis speed per level) and Order Network (+10% coin order rewards per level), each with five levels.
+Permanent research includes Synthesis Engineering (+15% synthesis speed per level) and Order Network (+10% of the base order coin reward per level for both order types), each with five levels.
 
 ## Local development
 

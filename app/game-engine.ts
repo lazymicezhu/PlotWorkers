@@ -650,10 +650,8 @@ export function submitOrder(state: GameState, orderId: string, random = Math.ran
     [order.processed.kind]: state.inventory[order.processed.kind] - order.processed.amount,
     [order.synthesized.kind]: state.inventory[order.synthesized.kind] - order.synthesized.amount,
   };
-  let coins = state.coins;
-  if (order.reward === "coins") {
-    coins += orderCoinReward(state, order);
-  } else {
+  const coins = state.coins + orderCoinReward(state, order);
+  if (order.reward === "special") {
     const item = randomSpecial(random);
     inventory.specials[item] += 1;
   }
@@ -663,7 +661,8 @@ export function submitOrder(state: GameState, orderId: string, random = Math.ran
 export function orderCoinReward(state: GameState, order: OrderState) {
   const processedPrice = order.processed.kind === "rough" ? state.market.roughPrice : state.market.refinedPrice;
   const synthPrice = SYNTHESIS_SELL_PRICES[order.synthesized.kind];
-  return Math.ceil((order.processed.amount * processedPrice + order.synthesized.amount * synthPrice) * 1.5 * (1 + state.research.orders * .1));
+  const standardReward = Math.ceil((order.processed.amount * processedPrice + order.synthesized.amount * synthPrice) * 1.5 * (1 + state.research.orders * .1));
+  return order.reward === "special" ? Math.ceil(standardReward * 1.5) : standardReward;
 }
 
 export function stepGame(state: GameState, seconds: number, random = Math.random): GameState {
