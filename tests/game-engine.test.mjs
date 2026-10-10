@@ -24,6 +24,7 @@ import {
   recyclePlot,
   recoveryRate,
   schedulerBotPrice,
+  sellProducts,
   staminaDrainRate,
   stepGame,
   submitOrder,
@@ -526,12 +527,45 @@ test("orders require manual delivery and pay the configured reward", () => {
   game.inventory.rough = 5;
   game.inventory.screws = 10;
   game.orders = [{ id: "order-1", remaining: 300, processed: { kind: "rough", amount: 5 }, synthesized: { kind: "screws", amount: 10 }, reward: "coins" }];
-  assert.equal(orderCoinReward(game, game.orders[0]), 150);
+  assert.equal(orderCoinReward(game, game.orders[0]), 525);
   const delivered = submitOrder(game, "order-1", () => 1);
   assert.equal(delivered.inventory.rough, 0);
   assert.equal(delivered.inventory.screws, 0);
-  assert.equal(delivered.coins, 250);
+  assert.equal(delivered.coins, 625);
   assert.equal(delivered.orders.length, 0);
+});
+
+test("selling screws individually or with all products pays the same fixed price", () => {
+  const game = state();
+  game.market.roughPrice = 12;
+  game.market.refinedPrice = 36;
+  Object.assign(game.inventory, { rough: 2, refined: 3, screws: 10, rebar: 4 });
+  const screwsOnly = sellProducts(game, "screws");
+  assert.equal(screwsOnly.coins - game.coins, 300);
+  assert.equal(screwsOnly.inventory.screws, 0);
+  assert.equal(screwsOnly.inventory.rough, 2);
+  assert.equal(screwsOnly.inventory.refined, 3);
+  assert.equal(screwsOnly.inventory.rebar, 4);
+  const all = sellProducts(game, "all");
+  assert.equal(all.coins - game.coins, 632);
+  assert.equal(sellProducts(screwsOnly, "all").coins, all.coins);
+  assert.deepEqual([all.inventory.rough, all.inventory.refined, all.inventory.screws, all.inventory.rebar], [0, 0, 0, 0]);
+  assert.equal(all.inventory.cans, game.inventory.cans);
+});
+
+test("saleable synthesis batches are worth more than their inputs even at peak market prices", () => {
+  for (const kind of ["screws", "rebar"]) {
+    const recipe = SYNTHESIS_RECIPES[kind];
+    const materials = state();
+    materials.market.roughPrice = 12;
+    materials.market.refinedPrice = 36;
+    Object.assign(materials.inventory, recipe.inputs);
+    const inputValue = sellProducts(materials, "all").coins - materials.coins;
+    const products = state();
+    products.inventory[kind] = recipe.output;
+    const outputValue = sellProducts(products, kind).coins - products.coins;
+    assert.ok(outputValue > inputValue, `${kind} should add value to its materials`);
+  }
 });
 
 test("orders dispatch every 180 seconds without probability and never exceed two", () => {

@@ -134,6 +134,8 @@ export const SYNTHESIS_RECIPES = {
   rebar: { name: "钢筋", seconds: 135, output: 10, inputs: { screws: 2, rough: 10, refined: 5 } },
 } as const;
 
+export const SYNTHESIS_SELL_PRICES = { screws: 30, rebar: 50 } as const;
+
 export const SPECIAL_ITEM_NAMES: Record<SpecialItemId, string> = {
   canOpener: "罐头起子",
   smartLeader: "智械领袖",
@@ -577,7 +579,7 @@ export function sellProducts(
   if (roughCount + refinedCount + screwCount + rebarCount === 0) return state;
   return {
     ...state,
-    coins: state.coins + roughCount * state.market.roughPrice + refinedCount * state.market.refinedPrice + screwCount * 5 + rebarCount * 50,
+    coins: state.coins + roughCount * state.market.roughPrice + refinedCount * state.market.refinedPrice + screwCount * SYNTHESIS_SELL_PRICES.screws + rebarCount * SYNTHESIS_SELL_PRICES.rebar,
     inventory: {
       ...state.inventory,
       rough: state.inventory.rough - roughCount,
@@ -660,7 +662,7 @@ export function submitOrder(state: GameState, orderId: string, random = Math.ran
 
 export function orderCoinReward(state: GameState, order: OrderState) {
   const processedPrice = order.processed.kind === "rough" ? state.market.roughPrice : state.market.refinedPrice;
-  const synthPrice = order.synthesized.kind === "screws" ? 5 : 50;
+  const synthPrice = SYNTHESIS_SELL_PRICES[order.synthesized.kind];
   return Math.ceil((order.processed.amount * processedPrice + order.synthesized.amount * synthPrice) * 1.5 * (1 + state.research.orders * .1));
 }
 
