@@ -4,7 +4,7 @@ export type Personality = "leader" | "slowBurn" | "lazy";
 export type RecipeId = "rough" | "refined";
 export type SynthesisRecipeId = "cans" | "screws" | "rebar";
 export type SpecialItemId = "canOpener" | "smartLeader" | "holyLight";
-export type ResearchId = "radar" | "structure" | "medicine" | "synthesis" | "orders";
+export type ResearchId = "synthesis" | "orders";
 export type WorkerStatus =
   | "idle"
   | "gathering"
@@ -15,8 +15,6 @@ export type WorkerStatus =
   | "exhausted"
   | "resting"
   | "ready"
-  | "unconscious"
-  | "recovering"
   | "dragging";
 
 export type WorkerState = {
@@ -39,7 +37,6 @@ export type WorkerState = {
   lazyElapsed: number;
   slowStacks: number;
   lastWorkZoneId: ZoneId | null;
-  recoveryRemaining: number;
 };
 
 export type PlotState = {
@@ -52,8 +49,6 @@ export type PlotState = {
   rows: 4 | 8;
   purchasePrice: number;
   enabled?: boolean;
-  damagedRemaining?: number;
-  reinforcedFor?: string | null;
 };
 
 export type SchedulerRobotState = {
@@ -76,18 +71,6 @@ export type SynthesisPlotState = {
   batch: { active: boolean; progress: number; reserved: Partial<Record<"rough" | "refined" | "screws", number>> };
 };
 
-export type ResourceZoneState = {
-  id: string;
-  x: number;
-  y: number;
-  radius: number;
-  bonus: .3 | .5 | 1;
-  remaining: number;
-  duration: number;
-  meteor: boolean;
-};
-
-export type CraterState = { id: string; x: number; y: number; radius: number; remaining: number };
 export type OrderState = {
   id: string;
   remaining: number;
@@ -102,7 +85,7 @@ export type TimedEffectsState = {
 };
 
 export type GameState = {
-  version: 7;
+  version: 8;
   coins: number;
   inventory: {
     raw: number;
@@ -126,7 +109,6 @@ export type GameState = {
   autoCanSupply: boolean;
   autoSchedulerSupply: boolean;
   schedulerServiceUnlocked: boolean;
-  environment: { spawnElapsed: number; serial: number; zones: ResourceZoneState[]; craters: CraterState[] };
   orders: OrderState[];
   orderElapsed: number;
   orderSerial: number;
@@ -136,9 +118,9 @@ export type GameState = {
 };
 
 export const INITIAL_PLOTS: PlotState[] = [
-  { id: "gather", type: "gather", name: "采集区", x: 80, y: 170, cols: 8, rows: 8, purchasePrice: 1200, enabled: true, damagedRemaining: 0, reinforcedFor: null },
-  { id: "process", type: "process", name: "加工区", x: 1080, y: 170, cols: 8, rows: 8, purchasePrice: 1200, enabled: true, damagedRemaining: 0, reinforcedFor: null },
-  { id: "living", type: "living", name: "生活区", x: 790, y: 745, cols: 4, rows: 4, purchasePrice: 300, enabled: true, damagedRemaining: 0, reinforcedFor: null },
+  { id: "gather", type: "gather", name: "采集区", x: 80, y: 170, cols: 8, rows: 8, purchasePrice: 1200, enabled: true },
+  { id: "process", type: "process", name: "加工区", x: 1080, y: 170, cols: 8, rows: 8, purchasePrice: 1200, enabled: true },
+  { id: "living", type: "living", name: "生活区", x: 790, y: 745, cols: 4, rows: 4, purchasePrice: 300, enabled: true },
 ];
 
 export const RECIPES = {
@@ -159,9 +141,6 @@ export const SPECIAL_ITEM_NAMES: Record<SpecialItemId, string> = {
 };
 
 export const RESEARCH = {
-  radar: { name: "环境雷达", costs: [10_000, 50_000, 250_000] },
-  structure: { name: "结构工程", costs: [25_000, 100_000, 400_000, 1_600_000, 6_400_000] },
-  medicine: { name: "应急医疗", costs: [20_000, 80_000, 320_000, 1_280_000, 5_120_000] },
   synthesis: { name: "合成工程", costs: [50_000, 200_000, 800_000, 3_200_000, 12_800_000] },
   orders: { name: "订单网络", costs: [50_000, 200_000, 800_000, 3_200_000, 12_800_000] },
 } as const;
@@ -182,8 +161,6 @@ export const STATUS_NAMES: Record<WorkerStatus, string> = {
   exhausted: "心情低落",
   resting: "休息中",
   ready: "精神饱满",
-  unconscious: "昏迷待救援",
-  recovering: "恢复中",
   dragging: "调度中",
 };
 
@@ -238,13 +215,12 @@ export function createInitialWorker(x: number, y: number): WorkerState {
     lazyElapsed: 0,
     slowStacks: 0,
     lastWorkZoneId: null,
-    recoveryRemaining: 0,
   };
 }
 
 export function createInitialState(x: number, y: number): GameState {
   return {
-    version: 7,
+    version: 8,
     coins: 100,
     inventory: { raw: 0, cans: 20, rough: 0, refined: 0, screws: 0, rebar: 0, specials: { canOpener: 0, smartLeader: 0, holyLight: 0 } },
     plots: INITIAL_PLOTS.map((plot) => ({ ...plot })),
@@ -262,11 +238,10 @@ export function createInitialState(x: number, y: number): GameState {
     autoCanSupply: false,
     autoSchedulerSupply: false,
     schedulerServiceUnlocked: false,
-    environment: { spawnElapsed: 0, serial: 0, zones: [], craters: [] },
     orders: [],
     orderElapsed: 0,
     orderSerial: 0,
-    research: { radar: 0, structure: 0, medicine: 0, synthesis: 0, orders: 0 },
+    research: { synthesis: 0, orders: 0 },
     effects: { canOpener: 0, smartLeader: 0, holyLight: null },
     plotPurchases: { gather: 0, process: 0, synthesis: 0, living: 0 },
   };
@@ -371,7 +346,7 @@ export function buyWorker(
   const zoneId = placement?.zoneId ?? "living";
   const livingPlot = state.plots.find((plot) => plot.id === zoneId && plot.type === "living");
   const capacity = livingPlot ? Math.floor(livingPlot.cols * livingPlot.rows / 4) : 0;
-  if (!livingPlot || livingPlot.enabled === false || (livingPlot.damagedRemaining ?? 0) > 0 || state.workers.filter((worker) => worker.zoneId === zoneId).length >= capacity) return state;
+  if (!livingPlot || livingPlot.enabled === false || state.workers.filter((worker) => worker.zoneId === zoneId).length >= capacity) return state;
   const worker = {
     ...createRandomWorker(state.workers.length + 1, x, y, random),
     zoneId,
@@ -413,7 +388,7 @@ export function buyPlot(state: GameState, plot: PlotState): GameState {
   return {
     ...state,
     coins: state.coins - cost,
-    plots: [...state.plots, { ...plot, purchasePrice: cost, enabled: true, damagedRemaining: 0, reinforcedFor: null }],
+    plots: [...state.plots, { ...plot, purchasePrice: cost, enabled: true }],
     processPlots: plot.type === "process" ? {
       ...state.processPlots,
       [plot.id]: { recipe: "rough", produced: 0, batch: { active: false, progress: 0, reservedRaw: 0 } },
@@ -431,8 +406,7 @@ export function recyclePlot(state: GameState, plotId: string): GameState {
   if (
     !plot ||
     state.plots.filter((item) => item.type === plot.type).length <= 1 ||
-    state.workers.some((worker) => worker.zoneId === plotId) ||
-    (plot.damagedRemaining ?? 0) > 0
+    state.workers.some((worker) => worker.zoneId === plotId)
   ) return state;
   return {
     ...state,
@@ -544,8 +518,8 @@ export function chooseAutoDispatch(
   }
   for (const targetId of reservedTargetIds) occupancyByPlot.set(targetId, (occupancyByPlot.get(targetId) ?? 0) + 1);
   const occupancy = (plotId: string) => occupancyByPlot.get(plotId) ?? 0;
-  const livingPlots = state.plots.filter((plot) => plot.type === "living" && plot.enabled !== false && (plot.damagedRemaining ?? 0) <= 0 && occupancy(plot.id) < capacity(plot));
-  const workPlots = state.plots.filter((plot) => plot.type !== "living" && plot.enabled !== false && (plot.damagedRemaining ?? 0) <= 0 && occupancy(plot.id) < capacity(plot));
+  const livingPlots = state.plots.filter((plot) => plot.type === "living" && plot.enabled !== false && occupancy(plot.id) < capacity(plot));
+  const workPlots = state.plots.filter((plot) => plot.type !== "living" && plot.enabled !== false && occupancy(plot.id) < capacity(plot));
   const requiredRaw = Math.min(
     ...state.plots
       .filter((plot) => plot.type === "process" && plot.enabled !== false)
@@ -560,7 +534,7 @@ export function chooseAutoDispatch(
   })[0];
   const exhausted = duties.rest ? state.workers.find((worker) =>
     !busy.has(worker.id) &&
-    (worker.status === "unconscious" || worker.status === "exhausted") &&
+    worker.status === "exhausted" &&
     (!worker.zoneId || plotTypes.get(worker.zoneId) !== "living")
   ) : undefined;
 
@@ -571,7 +545,7 @@ export function chooseAutoDispatch(
 
   if (exhausted && !livingPlots.length && duties.work) {
     const candidate = state.workers
-      .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && worker.status !== "recovering" && worker.status !== "unconscious" && Boolean(worker.zoneId) && plotTypes.get(worker.zoneId!) === "living")
+      .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && Boolean(worker.zoneId) && plotTypes.get(worker.zoneId!) === "living")
       .sort((a, b) => b.mood - a.mood)[0];
     const target = balancedWorkPlot();
     if (candidate && target) return { workerId: candidate.id, targetId: target.id, action: "work" };
@@ -614,16 +588,14 @@ export function sellProducts(
   };
 }
 
-const EVENT_GRID = 52;
-export const SPECIAL_DROP_CHANCE = .0025;
+const HALF_TILE_WIDTH = 52;
 const plotCenter = (plot: PlotState) => ({ x: plot.x + plot.rows * 52, y: plot.y + plot.rows * 27 });
-const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, (a.y - b.y) * 52 / 27);
 const pointInDiamond = (x: number, y: number, plot: PlotState) => {
   const center = plotCenter(plot);
   return Math.abs(x - center.x) / (plot.rows * 52) + Math.abs(y - center.y) / (plot.rows * 27) <= 1;
 };
 export function circleHitsPlot(x: number, y: number, radius: number, plot: PlotState) {
-  const r = radius * EVENT_GRID;
+  const r = radius * HALF_TILE_WIDTH;
   const center = plotCenter(plot);
   if (pointInDiamond(x, y, plot)) return true;
   const vertices = [
@@ -632,7 +604,7 @@ export function circleHitsPlot(x: number, y: number, radius: number, plot: PlotS
     { x: center.x, y: plot.y + plot.rows * 54 },
     { x: plot.x, y: center.y },
   ];
-  const scaleY = EVENT_GRID / 27;
+  const scaleY = HALF_TILE_WIDTH / 27;
   const circle = { x, y: y * scaleY };
   const scaledVertices = vertices.map((point) => ({ x: point.x, y: point.y * scaleY }));
   const distanceToEdge = (start: { x: number; y: number }, end: { x: number; y: number }) => {
@@ -692,16 +664,6 @@ export function orderCoinReward(state: GameState, order: OrderState) {
   return Math.ceil((order.processed.amount * processedPrice + order.synthesized.amount * synthPrice) * 1.5 * (1 + state.research.orders * .1));
 }
 
-export function reinforcePlot(state: GameState, plotId: string): GameState {
-  const plot = state.plots.find((item) => item.id === plotId);
-  if (!plot || state.research.structure < 1 || (plot.damagedRemaining ?? 0) > 0 || plot.reinforcedFor) return state;
-  const warningLead = 10 + state.research.radar * 5;
-  const threat = state.environment.zones.find((zone) => zone.meteor && zone.remaining <= warningLead && circleHitsPlot(zone.x, zone.y, zone.radius, plot));
-  const cost = Math.max(5000, plot.purchasePrice * 10);
-  if (!threat || state.coins < cost) return state;
-  return { ...state, coins: state.coins - cost, plots: state.plots.map((item) => item.id === plotId ? { ...item, reinforcedFor: threat.id } : item) };
-}
-
 export function stepGame(state: GameState, seconds: number, random = Math.random): GameState {
   const dt = clamp(seconds, 0, 1);
   if (dt <= 0) return state;
@@ -721,56 +683,8 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   if (effects.holyLight && effects.holyLight.remaining <= 0) effects.holyLight = null;
   const processPlots = Object.fromEntries(Object.entries(state.processPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch } }]));
   const synthesisPlots = Object.fromEntries(Object.entries(state.synthesisPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch, reserved: { ...value.batch.reserved } } }]));
-  let plots = state.plots.map((plot) => ({ ...plot, damagedRemaining: Math.max(0, (plot.damagedRemaining ?? 0) - dt) }));
-  const workers = state.workers.map((worker) => ({ ...worker, recoveryRemaining: worker.recoveryRemaining ?? 0 }));
-  const environment = {
-    spawnElapsed: state.environment.spawnElapsed + dt,
-    serial: state.environment.serial,
-    zones: state.environment.zones.map((zone) => ({ ...zone })),
-    craters: state.environment.craters.map((crater) => ({ ...crater, remaining: crater.remaining - dt })).filter((crater) => crater.remaining > 0),
-  };
-
-  if (environment.spawnElapsed >= 180) {
-    environment.spawnElapsed %= 180;
-    if (environment.zones.length < 3) {
-      const centers = plots.map(plotCenter);
-      const minX = Math.min(...centers.map((point) => point.x)) - 650;
-      const maxX = Math.max(...centers.map((point) => point.x)) + 650;
-      const minY = Math.min(...centers.map((point) => point.y)) - 400;
-      const maxY = Math.max(...centers.map((point) => point.y)) + 400;
-      let x = minX + random() * (maxX - minX);
-      let y = minY + random() * (maxY - minY);
-      for (let attempt = 0; attempt < 10 && environment.zones.some((zone) => distance(zone, { x, y }) < 10 * EVENT_GRID); attempt += 1) {
-        x = minX + random() * (maxX - minX); y = minY + random() * (maxY - minY);
-      }
-      const duration = 150 + Math.floor(random() * 351);
-      const bonus = ([.3, .5, 1] as const)[Math.min(2, Math.floor(random() * 3))];
-      environment.serial += 1;
-      environment.zones.push({ id: `resource-${environment.serial}`, x, y, radius: 12, bonus, duration, remaining: duration, meteor: random() < .5 });
-    }
-  }
-
-  const expiredZones: ResourceZoneState[] = [];
-  for (const zone of environment.zones) {
-    zone.remaining -= dt;
-    if (zone.remaining <= 0) expiredZones.push(zone);
-  }
-  for (const zone of expiredZones.filter((item) => item.meteor)) {
-    environment.craters.push({ id: `crater-${zone.id}`, x: zone.x, y: zone.y, radius: zone.radius, remaining: 600 });
-    const rebuildBase = 300 * (1 - state.research.structure * .1);
-    const recoveryBase = Math.max(120, 180 - state.research.medicine * 12);
-    const hitIds = new Set(plots.filter((plot) => circleHitsPlot(zone.x, zone.y, zone.radius, plot)).map((plot) => plot.id));
-    const reinforcedIds = new Set(plots.filter((plot) => plot.reinforcedFor === zone.id).map((plot) => plot.id));
-    plots = plots.map((plot) => hitIds.has(plot.id) ? { ...plot, damagedRemaining: rebuildBase * (reinforcedIds.has(plot.id) ? .5 : 1), reinforcedFor: null } : plot);
-    for (const worker of workers) if (worker.zoneId && hitIds.has(worker.zoneId)) {
-      worker.status = "unconscious";
-      worker.recoveryRemaining = recoveryBase * (reinforcedIds.has(worker.zoneId) ? .5 : 1);
-      worker.mood = 0;
-    }
-  }
-  environment.zones = environment.zones.filter((zone) => zone.remaining > 0);
-  const activeZoneIds = new Set(environment.zones.map((zone) => zone.id));
-  plots = plots.map((plot) => plot.reinforcedFor && !activeZoneIds.has(plot.reinforcedFor) ? { ...plot, reinforcedFor: null } : plot);
+  const plots = state.plots;
+  const workers = state.workers.map((worker) => ({ ...worker }));
 
   const plotById = new Map(plots.map((plot) => [plot.id, plot]));
   const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
@@ -781,19 +695,14 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const plot = worker.zoneId ? plotById.get(worker.zoneId) : undefined;
     const zoneType = plot?.type;
     if (!plot || !zoneType) { worker.status = "idle"; worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0; continue; }
-    if ((plot.damagedRemaining ?? 0) > 0) { worker.status = "unconscious"; continue; }
     if (plot.enabled === false) {
-      worker.status = worker.status === "unconscious" || worker.status === "recovering" ? "unconscious" : "idle";
+      worker.status = "idle";
       worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
       continue;
     }
     if (zoneType === "living") {
       worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
-      if (worker.status === "unconscious" || worker.status === "recovering") {
-        worker.status = "recovering";
-        worker.recoveryRemaining = Math.max(0, worker.recoveryRemaining - dt);
-        if (worker.recoveryRemaining <= 0) { worker.mood = 100; worker.status = "ready"; }
-      } else if (worker.mood >= 100) { worker.mood = 100; worker.status = "ready"; }
+      if (worker.mood >= 100) { worker.mood = 100; worker.status = "ready"; }
       else if (inventory.cans > 0) {
         const rate = recoveryRate(worker.spirit) * (effects.canOpener > 0 || state.canOpenerSeconds > 0 ? 1.5 : 1);
         const actualSeconds = Math.min(dt, (100 - worker.mood) / rate, inventory.cans / .01);
@@ -803,7 +712,6 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       } else worker.status = "waiting";
       continue;
     }
-    if (worker.status === "unconscious" || worker.status === "recovering") { worker.status = "unconscious"; continue; }
     if (worker.mood <= 0) { worker.mood = 0; worker.status = "exhausted"; continue; }
     if (workZones.includes(zoneType)) {
       worker.continuousWork += dt;
@@ -815,7 +723,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     }
   }
 
-  const gatherWorkers = workers.filter((worker) => worker.zoneId && zoneTypes.get(worker.zoneId) === "gather" && worker.mood > 0 && worker.status !== "dragging" && plotById.get(worker.zoneId)?.enabled !== false && (plotById.get(worker.zoneId)?.damagedRemaining ?? 0) <= 0);
+  const gatherWorkers = workers.filter((worker) => worker.zoneId && zoneTypes.get(worker.zoneId) === "gather" && worker.mood > 0 && worker.status !== "dragging" && plotById.get(worker.zoneId)?.enabled !== false);
   const gatherLeaders = new Map<string, number>();
   for (const worker of gatherWorkers) if (worker.personality === "leader") gatherLeaders.set(worker.zoneId!, (gatherLeaders.get(worker.zoneId!) ?? 0) + 1);
   for (const worker of gatherWorkers) {
@@ -823,8 +731,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const holy = holyPlot(plot);
     if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100);
     if (worker.status !== "slacking") {
-      const resourceBonus = Math.max(0, ...environment.zones.filter((zone) => circleHitsPlot(zone.x, zone.y, zone.radius, plot)).map((zone) => zone.bonus));
-      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * (1 + resourceBonus) * (holy ? 2 : 1);
+      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * (holy ? 2 : 1);
       inventory.raw += 10 * rate * dt;
       worker.status = worker.mood <= 0 ? "exhausted" : "gathering";
     } else if (worker.mood <= 0) worker.status = "exhausted";
@@ -832,13 +739,13 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
 
   const workersByType = (type: ZoneType) => {
     const map = new Map<string, WorkerState[]>();
-    for (const worker of workers) if (worker.zoneId && zoneTypes.get(worker.zoneId) === type && worker.mood > 0 && worker.status !== "dragging" && plotById.get(worker.zoneId)?.enabled !== false && (plotById.get(worker.zoneId)?.damagedRemaining ?? 0) <= 0) {
+    for (const worker of workers) if (worker.zoneId && zoneTypes.get(worker.zoneId) === type && worker.mood > 0 && worker.status !== "dragging" && plotById.get(worker.zoneId)?.enabled !== false) {
       const group = map.get(worker.zoneId); if (group) group.push(worker); else map.set(worker.zoneId, [worker]);
     }
     return map;
   };
   const processWorkersByPlot = workersByType("process");
-  for (const plot of plots.filter((item) => item.type === "process" && item.enabled !== false && (item.damagedRemaining ?? 0) <= 0)) {
+  for (const plot of plots.filter((item) => item.type === "process" && item.enabled !== false)) {
     const plotState = processPlots[plot.id] ?? { recipe: "rough" as const, produced: 0, batch: { active: false, progress: 0, reservedRaw: 0 } };
     processPlots[plot.id] = plotState;
     const group = processWorkersByPlot.get(plot.id) ?? [];
@@ -854,7 +761,6 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += 1; plotState.produced += 1;
-        if (environment.craters.some((crater) => circleHitsPlot(crater.x, crater.y, crater.radius, plot)) && random() < SPECIAL_DROP_CHANCE) inventory.specials[randomSpecial(random)] += 1;
         if (inventory.raw >= recipe.raw) { inventory.raw -= recipe.raw; plotState.batch = { active: true, progress: overflow, reservedRaw: recipe.raw }; }
         else plotState.batch = { active: false, progress: 0, reservedRaw: 0 };
       }
@@ -862,7 +768,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   }
 
   const synthesisWorkersByPlot = workersByType("synthesis");
-  for (const plot of plots.filter((item) => item.type === "synthesis" && item.enabled !== false && (item.damagedRemaining ?? 0) <= 0)) {
+  for (const plot of plots.filter((item) => item.type === "synthesis" && item.enabled !== false)) {
     const plotState = synthesisPlots[plot.id] ?? { recipe: "cans" as const, produced: 0, batch: { active: false, progress: 0, reserved: {} } };
     synthesisPlots[plot.id] = plotState;
     const group = synthesisWorkersByPlot.get(plot.id) ?? [];
@@ -900,20 +806,26 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     orderElapsed = 0;
   }
   const canOpenerSeconds = Math.max(0, state.canOpenerSeconds - dt);
-  return { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, environment, orders, orderElapsed, orderSerial, effects };
+  return { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, orders, orderElapsed, orderSerial, effects };
 }
 
 export function parseSavedState(value: string | null): GameState | null {
   if (!value) return null;
   try {
-    const parsed = JSON.parse(value) as Omit<Partial<GameState>, "version"> & {
+    const parsed = JSON.parse(value) as Omit<Partial<GameState>, "version" | "workers"> & {
       version?: number;
+      workers?: (Omit<WorkerState, "status"> & {
+        status: WorkerStatus | "unconscious" | "recovering";
+        recoveryRemaining?: number;
+        moving?: boolean;
+        motion?: string;
+      })[];
       recipe?: RecipeId;
       recipeProduced?: number;
       batch?: ProcessPlotState["batch"];
     };
     if (
-      ![1, 2, 3, 4, 5, 6, 7].includes(parsed.version ?? 0) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8].includes(parsed.version ?? 0) ||
       !Number.isFinite(parsed.coins) ||
       !Array.isArray(parsed.workers) ||
       !parsed.inventory ||
@@ -924,15 +836,18 @@ export function parseSavedState(value: string | null): GameState | null {
     const rawPlots = Array.isArray(parsed.plots) && parsed.plots.length
       ? parsed.plots
       : INITIAL_PLOTS.map((plot) => ({ ...plot }));
-    const plots = rawPlots.map((plot) => ({
-      ...plot,
-      purchasePrice: Number.isFinite(plot.purchasePrice) && plot.purchasePrice > 0
-        ? plot.purchasePrice
-        : plotPurchasePrice(plot.cols),
-      enabled: plot.enabled !== false,
-      damagedRemaining: Number.isFinite(plot.damagedRemaining) ? Math.max(0, plot.damagedRemaining ?? 0) : 0,
-      reinforcedFor: typeof plot.reinforcedFor === "string" ? plot.reinforcedFor : null,
-    }));
+    const plots = rawPlots.map((plot) => {
+      const restored = { ...plot } as PlotState & { damagedRemaining?: number; reinforcedFor?: string | null };
+      delete restored.damagedRemaining;
+      delete restored.reinforcedFor;
+      return {
+        ...restored,
+        purchasePrice: Number.isFinite(plot.purchasePrice) && plot.purchasePrice > 0
+          ? plot.purchasePrice
+          : plotPurchasePrice(plot.cols),
+        enabled: plot.enabled !== false,
+      };
+    });
     const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
     const firstProcessId = plots.find((plot) => plot.type === "process")?.id;
     const processPlots = Object.fromEntries(plots
@@ -991,8 +906,8 @@ export function parseSavedState(value: string | null): GameState | null {
       };
     });
     return {
-      ...(parsed as GameState),
-      version: 7,
+      version: 8,
+      coins: parsed.coins!,
       plots,
       processPlots,
       synthesisPlots,
@@ -1023,35 +938,29 @@ export function parseSavedState(value: string | null): GameState | null {
         refinedPrice: Math.round(parsed.market.refinedPrice),
       },
       workers: parsed.workers.map((worker) => {
-        const rest = { ...worker } as WorkerState & { moving?: boolean; motion?: string };
-        delete rest.moving;
-        delete rest.motion;
+        // Retired meteor injuries must not leave old saves unable to work.
+        const wasInjured = worker.status === "unconscious" || worker.status === "recovering" || (worker.recoveryRemaining ?? 0) > 0;
+        const restored = { ...worker };
+        delete restored.moving;
+        delete restored.motion;
+        delete restored.recoveryRemaining;
+        const mood = wasInjured ? 100 : worker.mood;
+        const status: WorkerStatus = wasInjured || worker.status === "dragging"
+          ? worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
+            ? (mood >= 100 ? "ready" : "resting")
+            : mood <= 0 ? "exhausted" : "idle"
+          : worker.status as WorkerStatus;
         return {
-          ...rest,
+          ...restored,
+          mood,
+          status,
           lastWorkZoneId: worker.lastWorkZoneId ?? null,
-          recoveryRemaining: Number.isFinite(worker.recoveryRemaining) ? Math.max(0, worker.recoveryRemaining) : 0,
-          ...(worker.status === "dragging" ? {
-            status: worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
-              ? (worker.mood >= 100 ? "ready" : "resting")
-              : worker.mood <= 0
-                ? "exhausted"
-                : "idle",
-          } : {}),
         };
       }),
-      environment: parsed.environment ? {
-        spawnElapsed: Number.isFinite(parsed.environment.spawnElapsed) ? Math.max(0, parsed.environment.spawnElapsed) : 0,
-        serial: Number.isFinite(parsed.environment.serial) ? Math.max(0, Math.floor(parsed.environment.serial)) : 0,
-        zones: Array.isArray(parsed.environment.zones) ? parsed.environment.zones : [],
-        craters: Array.isArray(parsed.environment.craters) ? parsed.environment.craters : [],
-      } : { spawnElapsed: 0, serial: 0, zones: [], craters: [] },
       orders: Array.isArray(parsed.orders) ? parsed.orders.filter((order) => order && order.remaining > 0).slice(0, 2) : [],
       orderElapsed: Number.isFinite(parsed.orderElapsed) ? clamp(parsed.orderElapsed!, 0, 180) : 0,
       orderSerial: Number.isFinite(parsed.orderSerial) ? Math.max(0, Math.floor(parsed.orderSerial!)) : 0,
       research: {
-        radar: clamp(Math.floor(parsed.research?.radar ?? 0), 0, 3),
-        structure: clamp(Math.floor(parsed.research?.structure ?? 0), 0, 5),
-        medicine: clamp(Math.floor(parsed.research?.medicine ?? 0), 0, 5),
         synthesis: clamp(Math.floor(parsed.research?.synthesis ?? 0), 0, 5),
         orders: clamp(Math.floor(parsed.research?.orders ?? 0), 0, 5),
       },

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  SPECIAL_DROP_CHANCE,
+  RESEARCH,
   SYNTHESIS_RECIPES,
   buyAutoCanSupply,
   buyAutoSchedulerSupply,
@@ -374,7 +374,7 @@ test("version one saves migrate plots, automation and movement state", async () 
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 7);
+  assert.equal(migrated.version, 8);
   assert.equal(migrated.plots.length, 3);
   assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
@@ -392,22 +392,24 @@ test("version one saves migrate plots, automation and movement state", async () 
   assert.deepEqual(migrated.plots.map((plot) => plot.purchasePrice), [1200, 1200, 300]);
 });
 
-test("resource zones spawn every 180 seconds and boost gathering at the plot center", () => {
+test("new games and elapsed simulation contain no environment system", () => {
   let game = state();
-  game.environment.spawnElapsed = 179;
-  game = stepGame(game, 1, () => .1);
-  assert.equal(game.environment.zones.length, 1);
-  assert.ok(game.environment.zones[0].duration >= 150 && game.environment.zones[0].duration <= 500);
+  assert.equal(game.version, 8);
+  assert.equal("environment" in game, false);
+  assert.ok(game.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
+  assert.ok(game.workers.every((worker) => !("recoveryRemaining" in worker)));
+  for (let second = 0; second < 181; second += 1) game = stepGame(game, 1, () => .1);
+  assert.equal("environment" in game, false);
   game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
-  game.environment.zones = [{ id: "bonus", x: 496, y: 386, radius: 12, bonus: .3, remaining: 100, duration: 100, meteor: false }];
-  const boosted = stepGame(game, 1, () => 1);
-  assert.equal(boosted.inventory.raw, 13);
+  const worked = stepGame(game, 1, () => 1);
+  assert.equal(worked.inventory.raw, 10);
+  assert.equal(worked.workers[0].status, "gathering");
 });
 
-test("a circle touching only the middle of a plot edge still grants its bonus", () => {
+test("holy light touching only the middle of a plot edge still grants its bonus", () => {
   let game = state();
   const gather = game.plots.find((plot) => plot.id === "gather");
-  const radius = 4;
+  const radius = 8;
   const edgeMidpoint = { x: 704, y: 278 };
   const offset = radius * 52 * .98 / Math.sqrt(2);
   const circleX = edgeMidpoint.x + offset;
@@ -415,37 +417,62 @@ test("a circle touching only the middle of a plot edge still grants its bonus", 
   assert.equal(circleHitsPlot(circleX, circleY, radius, gather), true);
 
   game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
-  game.environment.zones = [{ id: "edge-bonus", x: circleX, y: circleY, radius, bonus: .3, remaining: 100, duration: 100, meteor: false }];
+  game.inventory.specials.holyLight = 1;
+  game = placeHolyLight(game, circleX, circleY);
   game = stepGame(game, 1, () => 1);
-  assert.equal(game.inventory.raw, 13);
+  assert.equal(game.inventory.raw, 20);
+  assert.equal(game.workers[0].mood, 100);
 });
 
-test("meteor impact damages intersecting plots and knocks workers unconscious", () => {
-  const game = state();
-  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "idle" };
-  game.environment.zones = [{ id: "impact", x: 496, y: 386, radius: 12, bonus: .5, remaining: .5, duration: 200, meteor: true }];
-  const hit = stepGame(game, 1, () => 1);
-  assert.equal(hit.plots.find((plot) => plot.id === "gather").damagedRemaining, 300);
-  assert.equal(hit.workers[0].status, "unconscious");
-  assert.equal(hit.workers[0].recoveryRemaining, 180);
-  assert.equal(hit.environment.craters[0].remaining, 600);
-  assert.equal(hit.environment.craters[0].radius, 12);
-});
+test("version seven saves remove environmental damage and resume existing production", async () => {
+  const { parseSavedState } = await import("../app/game-engine.ts");
+  const old = state();
+  old.version = 7;
+  old.coins = 1234;
+  old.inventory.specials = { canOpener: 2, smartLeader: 3, holyLight: 4 };
+  old.research = { radar: 3, structure: 5, medicine: 5, synthesis: 2, orders: 1 };
+  old.environment = {
+    spawnElapsed: 179,
+    serial: 5,
+    zones: [
+      { id: "bonus", x: 496, y: 386, radius: 12, bonus: 1, remaining: 100, duration: 200, meteor: false },
+      { id: "impact", x: 496, y: 386, radius: 12, bonus: .5, remaining: .5, duration: 200, meteor: true },
+    ],
+    craters: [{ id: "crater", x: 1496, y: 386, radius: 12, remaining: 600 }],
+  };
+  old.plots = old.plots.map((plot) => ({ ...plot, damagedRemaining: 300, reinforcedFor: "impact" }));
+  const base = { ...old.workers[0], mood: 0, recoveryRemaining: 180 };
+  old.workers = [
+    { ...base, id: "resting-worker", zoneId: "living", status: "recovering" },
+    { ...base, id: "gather-worker", zoneId: "gather", status: "unconscious" },
+    { ...base, id: "process-worker", zoneId: "process", status: "recovering" },
+    { ...base, id: "unassigned-worker", zoneId: null, status: "unconscious" },
+  ];
+  old.processPlots.process = { recipe: "rough", produced: 7, batch: { active: true, progress: .95, reservedRaw: 75 } };
 
-test("meteor impact never expands beyond its resource zone", () => {
-  const game = state();
-  game.environment.zones = [{ id: "edge-impact", x: 1640, y: 386, radius: 12, bonus: .5, remaining: .5, duration: 200, meteor: true }];
-  const hit = stepGame(game, 1, () => 1);
-  assert.equal(hit.plots.find((plot) => plot.id === "gather").damagedRemaining, 0);
-});
+  const migrated = parseSavedState(JSON.stringify(old));
+  assert.equal(migrated.version, 8);
+  assert.equal("environment" in migrated, false);
+  assert.ok(migrated.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
+  assert.ok(migrated.workers.every((worker) => !("recoveryRemaining" in worker)));
+  assert.deepEqual(migrated.workers.map((worker) => worker.status), ["ready", "idle", "idle", "idle"]);
+  assert.deepEqual(migrated.workers.map((worker) => worker.mood), [100, 100, 100, 100]);
+  assert.equal(migrated.coins, old.coins);
+  assert.deepEqual(migrated.inventory, old.inventory);
+  assert.deepEqual(migrated.research, { synthesis: 2, orders: 1 });
+  assert.deepEqual(migrated.processPlots, old.processPlots);
 
-test("unconscious workers recover only while assigned to a living plot", () => {
-  const game = state();
-  game.workers[0] = { ...game.workers[0], status: "unconscious", recoveryRemaining: 1, mood: 0 };
-  const recovered = stepGame(game, 1);
-  assert.equal(recovered.workers[0].status, "ready");
-  assert.equal(recovered.workers[0].mood, 100);
-  assert.equal(recovered.inventory.cans, 20);
+  const next = stepGame(migrated, 1, () => 0);
+  assert.equal("environment" in next, false);
+  assert.equal(next.inventory.raw, 10);
+  assert.equal(next.inventory.rough, 1);
+  assert.equal(next.processPlots.process.produced, 8);
+  assert.equal(next.processPlots.process.batch.active, false);
+  assert.equal(next.workers[1].status, "gathering");
+  assert.equal(next.workers[2].status, "processing");
+  assert.equal(next.inventory.cans, old.inventory.cans);
+  assert.deepEqual(next.inventory.specials, old.inventory.specials);
+  assert.deepEqual(parseSavedState(JSON.stringify(next)), next);
 });
 
 test("synthesis batches reserve ingredients, produce cans and refund on recipe changes", () => {
@@ -522,9 +549,15 @@ test("orders dispatch every 180 seconds without probability and never exceed two
   assert.equal(game.orderElapsed, 180);
 });
 
-test("meteor crater special item chance is reduced below one percent", () => {
-  assert.equal(SPECIAL_DROP_CHANCE, .0025);
-  assert.ok(SPECIAL_DROP_CHANCE < .01);
+test("special items remain available as order rewards", () => {
+  const game = state();
+  game.inventory.rough = 5;
+  game.inventory.screws = 10;
+  game.orders = [{ id: "special-order", remaining: 300, processed: { kind: "rough", amount: 5 }, synthesized: { kind: "screws", amount: 10 }, reward: "special" }];
+  const delivered = submitOrder(game, "special-order", () => 1);
+  assert.equal(delivered.inventory.specials.holyLight, 1);
+  assert.equal(delivered.orders.length, 0);
+  assert.equal(delivered.coins, game.coins);
 });
 
 test("expansion prices and permanent research scale without decreasing", () => {
@@ -546,8 +579,9 @@ test("expansion prices and permanent research scale without decreasing", () => {
   assert.equal(schedulerBotPrice(game), 4800);
   game.schedulerBots = 11;
   assert.equal(schedulerBotPrice(game), 11500);
-  game.coins = 10_000;
-  const researched = buyResearch(game, "radar");
+  assert.deepEqual(Object.keys(RESEARCH), ["synthesis", "orders"]);
+  game.coins = 50_000;
+  const researched = buyResearch(game, "synthesis");
   assert.equal(researched.coins, 0);
-  assert.equal(researched.research.radar, 1);
+  assert.equal(researched.research.synthesis, 1);
 });

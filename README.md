@@ -8,10 +8,10 @@ Plot Workers is an incremental management game about building production chains 
 
 - A complete gather → process → synthesize → sell/order production loop
 - Drag-and-drop worker assignment and movable isometric plots
-- Worker mood, attributes, personalities, rest, and recovery
+- Worker mood, attributes, personalities, and rest
 - Per-plot recipes, batch production, market prices, and timed orders
-- Robot dispatch automation and permanent research upgrades
-- Resource zones, meteor strikes, ruins, and special items
+- Robot dispatch automation and permanent upgrades for synthesis speed and coin order rewards
+- Special items earned from item-reward orders to boost production, robot transport, and mood recovery
 - Versioned local saves with no account required
 
 ## How to play
@@ -19,10 +19,14 @@ Plot Workers is an incremental management game about building production chains 
 1. Drag workers onto gathering plots to produce raw materials.
 2. Move them to processing and synthesis plots to create products.
 3. Sell products or deliver orders to earn coins.
-4. Send tired or injured workers to living plots.
+4. Send tired workers to living plots.
 5. Expand with more workers, plots, robots, and research.
 
 Drag an empty part of the scene to move the camera. Use the mouse wheel or the `+` and `-` keys to zoom. Press and drag a plot to reposition it.
+
+Building a synthesis plot unlocks orders. A new order arrives every 180 seconds, with up to two active at once; deliver the required products manually to receive its displayed coin or special-item reward. Use special items from the backpack when needed.
+
+Permanent research includes Synthesis Engineering (+15% synthesis speed per level) and Order Network (+10% coin order rewards per level), each with five levels.
 
 ## Local development
 
@@ -89,6 +93,12 @@ If a fully static edition is needed, follow Cloudflare's [Next.js static export 
 - The game does not require an account and does not include analytics or telemetry.
 - Simulation pauses while the page is hidden; there are no offline earnings.
 - Local environment files, deployment state, logs, and credentials are excluded from Git.
+
+### Save compatibility
+
+Save version 8 removes the environment system: resource zones, meteor strikes, crater drops, plot damage, worker injuries, and their related research. Saves from versions 1–7 upgrade automatically when loaded, restoring damaged plots and returning injured workers to full mood.
+
+Existing coins, inventory, plots, workers, production batches, orders, and synthesis/order research levels are preserved. Removed research purchases are not refunded. No restart is required.
 
 ## Design documents
 

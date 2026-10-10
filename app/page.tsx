@@ -50,7 +50,6 @@ import {
   parseSavedState,
   placeHolyLight,
   recyclePlot,
-  reinforcePlot,
   schedulerBotPrice,
   sellProducts,
   submitOrder,
@@ -122,7 +121,7 @@ type WalkerSpriteProps = {
 
 const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfer, dragging, tracked, hovered, raised, onDown, onEnter, onLeave }: WalkerSpriteProps) {
   const automated = Boolean(autoTransfer);
-  const hasStatusBadge = worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking" || worker.status === "unconscious" || worker.status === "recovering";
+  const hasStatusBadge = worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking";
   return <div
     className={`walker ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${autoTransfer?.action === "wake" ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
     data-worker-id={worker.id}
@@ -134,7 +133,7 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
     aria-label={`${worker.name}，${STATUS_NAMES[worker.status]}`}
   >
     {autoTransfer?.action === "wake" && <span className="wake-gripper" aria-hidden="true">🦾</span>}
-    {hasStatusBadge && <span className={`worker-badge badge-${worker.status}`}>{worker.status === "exhausted" ? "需要休息" : worker.status === "ready" ? "可以工作" : worker.status === "unconscious" ? "昏迷待救援" : worker.status === "recovering" ? `恢复${Math.ceil(worker.recoveryRemaining)}s` : "摸鱼中"}</span>}
+    {hasStatusBadge && <span className={`worker-badge badge-${worker.status}`}>{worker.status === "exhausted" ? "需要休息" : worker.status === "ready" ? "可以工作" : "摸鱼中"}</span>}
     <span className="walker-shadow" />
     <img className="worker-image" src="/worker.png" alt="" draggable={false} />
   </div>;
@@ -218,7 +217,6 @@ function validPlotPosition(candidate: PlotState, plots: PlotState[], excludeId?:
 
 function statusAfterDrop(worker: WorkerState, plot: PlotState | null) {
   if (!plot) return "idle" as const;
-  if (worker.recoveryRemaining > 0) return plot.type === "living" ? "recovering" as const : "unconscious" as const;
   if (plot.type === "living") return worker.mood >= 100 ? "ready" as const : "resting" as const;
   return worker.mood <= 0 ? "exhausted" as const : "idle" as const;
 }
@@ -270,7 +268,6 @@ export default function Home() {
   const [selectedSynthesisPlotId, setSelectedSynthesisPlotId] = useState<ZoneId>("");
   const [placingHoly, setPlacingHoly] = useState(false);
   const [holyPreview, setHolyPreview] = useState<{ x: number; y: number } | null>(null);
-  const [eventsExpanded, setEventsExpanded] = useState(true);
   const [resetArmed, setResetArmed] = useState(false);
   const [notice, setNotice] = useState("");
   const [builderType, setBuilderType] = useState<ZoneType>("gather");
@@ -405,9 +402,7 @@ export default function Home() {
           worker.id !== hoveredWorkerRef.current &&
           Boolean(worker.zoneId) &&
           worker.status !== "dragging" &&
-          worker.status !== "exhausted" &&
-          worker.status !== "unconscious" &&
-          worker.status !== "recovering"
+          worker.status !== "exhausted"
         );
         if (!eligible.length) return current;
         const batchSize = current.workers.length > 300 ? 12 : current.workers.length > 150 ? 10 : 8;
@@ -589,19 +584,15 @@ export default function Home() {
     const origin = dragOrigin.current;
     const moved = Math.hypot(clientX - dragStart.current.x, clientY - dragStart.current.y) > 5;
     const full = target ? gameRef.current.workers.filter((worker) => worker.id !== id && worker.zoneId === target.id).length >= plotCapacity(target) : false;
-    const damaged = Boolean(target && (target.damagedRemaining ?? 0) > 0);
     const disabled = Boolean(target && target.enabled === false);
-    const invalidRecovery = Boolean(origin && origin.recoveryRemaining > 0 && target?.type !== "living");
     if (full) setNotice(`${target?.name}已达到${target ? plotCapacity(target) : 0}人上限`);
-    else if (damaged) setNotice("废墟正在重建，暂时不能接收人物");
     else if (disabled) setNotice("该地块已停用，请先在地块管理中启用");
-    else if (invalidRecovery) setNotice("昏迷人物必须送到生活区恢复");
     setGame((current) => {
       const next: GameState = {
         ...current,
         workers: current.workers.map((worker) => {
           if (worker.id !== id) return worker;
-          if (!moved || !origin || !target || full || damaged || disabled || invalidRecovery) return origin ? restoreWorker(origin, current.plots) : worker;
+          if (!moved || !origin || !target || full || disabled) return origin ? restoreWorker(origin, current.plots) : worker;
           const raw = unproject(target, point.x, point.y);
           const u = Math.max(.4, Math.min(target.cols - .4, raw.u));
           const v = Math.max(.4, Math.min(target.rows - .4, raw.v));
@@ -610,7 +601,7 @@ export default function Home() {
           const lastWorkZoneId = target.type === "living"
             ? (source && source.type !== "living" ? source.id : worker.lastWorkZoneId)
             : target.id;
-          return { ...worker, zoneId: target.id, u, v, ...project(target, u, v), duration: 500, facing: point.x < origin.x ? "left" : "right", status: statusAfterDrop(origin, target), recoveryRemaining: origin.recoveryRemaining, lastWorkZoneId, continuousWork: changedZone ? 0 : worker.continuousWork, slowStacks: changedZone ? 0 : worker.slowStacks, lazyElapsed: 0 };
+          return { ...worker, zoneId: target.id, u, v, ...project(target, u, v), duration: 500, facing: point.x < origin.x ? "left" : "right", status: statusAfterDrop(origin, target), lastWorkZoneId, continuousWork: changedZone ? 0 : worker.continuousWork, slowStacks: changedZone ? 0 : worker.slowStacks, lazyElapsed: 0 };
         }),
       };
       localStorage.setItem(SAVE_KEY, JSON.stringify(next));
@@ -641,7 +632,6 @@ export default function Home() {
   function onPlotDown(event: PointerEvent<HTMLDivElement>, plot: PlotState) {
     event.stopPropagation();
     if (draggingId || placingPlot) return;
-    if ((plot.damagedRemaining ?? 0) > 0) return setNotice(`地块还需${Math.ceil(plot.damagedRemaining ?? 0)}秒重建`);
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = positionInWorld(event.clientX, event.clientY);
@@ -723,7 +713,7 @@ export default function Home() {
   function beginPlotPlacement() {
     if (game.coins < selectedPlotPrice) return setNotice(`需要${selectedPlotPrice}金币`);
     const meta = ZONE_META[builderType];
-    const plot: PlotState = { id: `zone-${Date.now()}`, type: builderType, name: meta.name, x: WORLD_W / 2 - builderSize * TILE_W / 2, y: WORLD_H / 2 - builderSize * TILE_H / 2, cols: builderSize, rows: builderSize, purchasePrice: selectedPlotPrice, damagedRemaining: 0, reinforcedFor: null };
+    const plot: PlotState = { id: `zone-${Date.now()}`, type: builderType, name: meta.name, x: WORLD_W / 2 - builderSize * TILE_W / 2, y: WORLD_H / 2 - builderSize * TILE_H / 2, cols: builderSize, rows: builderSize, purchasePrice: selectedPlotPrice };
     const placement = { plot, valid: validPlotPosition(plot, game.plots) };
     placingPlotRef.current = placement;
     setPlacingPlot(placement);
@@ -846,7 +836,7 @@ export default function Home() {
 
   function onPanDown(event: PointerEvent<HTMLElement>) {
     if (placingHoly) {
-      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .event-dock, .confirm-panel")) return;
+      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel")) return;
       event.preventDefault();
       event.stopPropagation();
       const point = positionInWorld(event.clientX, event.clientY);
@@ -899,7 +889,7 @@ export default function Home() {
 
   function buyNewWorker() {
     const living = [...game.plots]
-      .filter((plot) => plot.type === "living" && plot.enabled !== false && (plot.damagedRemaining ?? 0) <= 0 && (workerCountByPlot.get(plot.id) ?? 0) < plotCapacity(plot))
+      .filter((plot) => plot.type === "living" && plot.enabled !== false && (workerCountByPlot.get(plot.id) ?? 0) < plotCapacity(plot))
       .sort((a, b) => {
         const ratio = (workerCountByPlot.get(a.id) ?? 0) / plotCapacity(a) - (workerCountByPlot.get(b.id) ?? 0) / plotCapacity(b);
         return ratio || a.id.localeCompare(b.id);
@@ -981,8 +971,6 @@ export default function Home() {
       </header>
 
       <div className={`world ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, "--camera-x": `${camera.x}px`, "--camera-y": `${camera.y}px` } as CSSProperties}>
-        {game.environment.craters.map((crater) => <div key={crater.id} className="ground-event crater-zone" style={{ left: crater.x - crater.radius * 52, top: crater.y - crater.radius * 27, width: crater.radius * 104, height: crater.radius * 54 } as CSSProperties}><span>陨石坑 · {Math.ceil(crater.remaining)}s</span></div>)}
-        {game.environment.zones.map((zone) => <div key={zone.id} className={`ground-event resource-zone ${zone.meteor && zone.remaining <= 10 ? "is-meteor" : ""}`} style={{ left: zone.x - zone.radius * 52, top: zone.y - zone.radius * 27, width: zone.radius * 104, height: zone.radius * 54, "--meteor-scale": zone.meteor && zone.remaining <= 10 ? `${Math.max(0, 1 - zone.remaining / 10)}` : 0 } as CSSProperties}><span>高资源 +{zone.bonus * 100}% · {Math.ceil(zone.remaining)}s</span></div>)}
         {game.effects.holyLight && <div className="ground-event holy-zone" style={{ left: game.effects.holyLight.x - 8 * 52, top: game.effects.holyLight.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(game.effects.holyLight.remaining)}s</span></div>}
         {placingHoly && holyPreview && <div className="ground-event holy-zone holy-preview" style={{ left: holyPreview.x - 8 * 52, top: holyPreview.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光覆盖范围 · 半径8格</span></div>}
         {visiblePlots.map((plot) => {
@@ -990,30 +978,25 @@ export default function Home() {
           const isMoving = plotDraft?.plot.id === plot.id;
           const valid = isPlacement ? placingPlot.valid : isMoving ? plotDraft.valid : true;
           const count = workerCountByPlot.get(plot.id) ?? 0;
-          const operational = plot.enabled !== false && (plot.damagedRemaining ?? 0) <= 0;
-          const resourceBonus = operational && plot.type === "gather" && game.environment.zones.some((zone) => circleHitsPlot(zone.x, zone.y, zone.radius, plot));
+          const operational = plot.enabled !== false;
           const holyBonus = operational && plot.type !== "living" && Boolean(game.effects.holyLight && circleHitsPlot(game.effects.holyLight.x, game.effects.holyLight.y, 8, plot));
-          const craterBonus = operational && plot.type === "process" && game.environment.craters.some((crater) => circleHitsPlot(crater.x, crater.y, crater.radius, plot));
           return <section
-            className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${(plot.damagedRemaining ?? 0) > 0 ? "is-damaged" : ""} ${resourceBonus ? "has-resource-bonus" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${craterBonus ? "has-crater-bonus" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
+            className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
             key={plot.id}
             style={{ left: plot.x, top: plot.y, width: plot.cols * TILE_W, height: plot.rows * TILE_H + CUBE_DEPTH, zIndex: isMoving || isPlacement ? PLOT_DRAG_Z : undefined, "--cols": plot.cols, "--rows": plot.rows, "--plot-width": `${plot.cols * TILE_W}px`, "--plot-height": `${plot.rows * TILE_H}px` } as CSSProperties}
           >
             <div className="plot-shadow" />
             <div className="plot-base" aria-hidden="true"><span className="base-left" /><span className="base-right" /></div>
             <PlotSurface plot={plot} />
-            {(resourceBonus || holyBonus || craterBonus) && <div className="plot-bonus-effect" aria-label="当前地块加成"><div className="plot-bonus-ripples" aria-hidden="true"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg></div><div className="plot-bonus-labels">{resourceBonus && <span>高资源</span>}{holyBonus && <span>圣光</span>}{craterBonus && <span>特殊掉落</span>}</div></div>}
+            {holyBonus && <div className="plot-bonus-effect" aria-label="当前地块加成"><div className="plot-bonus-ripples" aria-hidden="true"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg></div><div className="plot-bonus-labels"><span>圣光</span></div></div>}
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
-            {!isPlacement && (plot.damagedRemaining ?? 0) <= 0 && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
-            <div className="zone-sign"><strong>{(plot.damagedRemaining ?? 0) > 0 ? "废墟重建中" : plot.name}</strong><span>{(plot.damagedRemaining ?? 0) > 0 ? `${Math.ceil(plot.damagedRemaining ?? 0)}s` : `${plot.cols}×${plot.rows} · ${count}/${plotCapacity(plot)}人${plot.enabled === false ? " · 已停用" : ""}`}</span></div>
-            {!isPlacement && (plot.damagedRemaining ?? 0) <= 0 && plot.type === "process" && <button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setPanel("process"); }}>配方</button>}
-            {!isPlacement && (plot.damagedRemaining ?? 0) <= 0 && plot.type === "synthesis" && <button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setPanel("synthesis"); }}>合成</button>}
-            {!isPlacement && (plot.damagedRemaining ?? 0) <= 0 && plot.type === "living" && <><button className="scene-action shop-action" onClick={() => setPanel("shop")}>商店</button><button className="scene-action sell-action" onClick={() => setPanel("sell")}>出售</button></>}
-            {!isPlacement && game.research.structure > 0 && game.environment.zones.some((zone) => zone.meteor && zone.remaining <= 10 + game.research.radar * 5 && circleHitsPlot(zone.x, zone.y, zone.radius, plot)) && !plot.reinforcedFor && <button className="scene-action reinforce-action" onClick={() => spend(() => reinforcePlot(game, plot.id), "地块已进行紧急加固", "金币不足或当前无法加固")}>加固</button>}
+            {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
+            <div className="zone-sign"><strong>{plot.name}</strong><span>{plot.cols}×{plot.rows} · {count}/{plotCapacity(plot)}人{plot.enabled === false ? " · 已停用" : ""}</span></div>
+            {!isPlacement && plot.type === "process" && <button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setPanel("process"); }}>配方</button>}
+            {!isPlacement && plot.type === "synthesis" && <button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setPanel("synthesis"); }}>合成</button>}
+            {!isPlacement && plot.type === "living" && <><button className="scene-action shop-action" onClick={() => setPanel("shop")}>商店</button><button className="scene-action sell-action" onClick={() => setPanel("sell")}>出售</button></>}
           </section>;
         })}
-
-        {game.environment.zones.filter((zone) => zone.meteor && zone.remaining <= 10).map((zone) => <div key={`warning-${zone.id}`} className="meteor-warning" style={{ left: zone.x - zone.radius * 52, top: zone.y - zone.radius * 27, width: zone.radius * 104, height: zone.radius * 54, transform: `scale(${Math.max(.02, 1 - zone.remaining / 10)})` } as CSSProperties}><span>陨石落点</span></div>)}
 
         {visibleWorkers.map((worker) => {
           const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
@@ -1031,9 +1014,7 @@ export default function Home() {
         {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
       </div>
 
-      <aside className={`event-dock ${eventsExpanded ? "is-open" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
-        <button className="event-toggle" onClick={() => setEventsExpanded((value) => !value)}>环境 {game.environment.zones.length}/3</button>
-        {eventsExpanded && <div className="event-list">{game.environment.zones.length ? game.environment.zones.map((zone) => <span key={zone.id} className={zone.meteor && zone.remaining <= 10 + game.research.radar * 5 ? "is-danger" : ""}>资源+{zone.bonus * 100}% · {Math.ceil(zone.remaining)}s{zone.meteor && zone.remaining <= 10 + game.research.radar * 5 ? " · 陨石预警" : ""}</span>) : <span>下一资源区 {Math.ceil(180 - game.environment.spawnElapsed)}s</span>}</div>}
+      <aside className="utility-dock" aria-label="订单与背包" onPointerDown={(event) => event.stopPropagation()}>
         <div className="dock-actions"><button onClick={() => setPanel("orders")} disabled={!game.plots.some((plot) => plot.type === "synthesis")}>订单 {game.orders.length}/2</button><button onClick={() => setPanel("inventory")}>背包 {Object.values(game.inventory.specials).reduce((sum, value) => sum + value, 0)}</button></div>
       </aside>
 
@@ -1057,9 +1038,9 @@ export default function Home() {
         </>}
         {panel === "plotBuilder" && <><h2>购买新地块</h2><p className="panel-note">同类型地块每购买一块，后续价格提高35%。</p><div className="builder-options">{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => <button key={type} className={builderType === type ? "is-selected" : ""} onClick={() => setBuilderType(type)}>{ZONE_META[type].name}</button>)}</div><div className="builder-options size-options">{([4, 8] as const).map((size) => <button key={size} className={builderSize === size ? "is-selected" : ""} onClick={() => setBuilderSize(size)}>{size}×{size}<small>{nextPlotPrice(game, builderType, size)}金币 · 容纳{size * size / 4}人</small></button>)}</div><button className="primary-action" disabled={game.coins < selectedPlotPrice} onClick={beginPlotPlacement}>购买并选择位置 · {selectedPlotPrice}金币</button>{placingPlot && <button className="cancel-placement" onClick={cancelPurchasedPlot}>取消摆放</button>}</>}
         {panel === "sell" && <><h2>出售产品</h2><div className="market-strip"><span>粗制 {game.market.roughPrice} <b className={game.market.roughPrice >= 10 ? "up" : "down"}>{Math.round((game.market.roughPrice / 10 - 1) * 100)}%</b></span><span>精制 {game.market.refinedPrice} <b className={game.market.refinedPrice >= 30 ? "up" : "down"}>{Math.round((game.market.refinedPrice / 30 - 1) * 100)}%</b></span><strong>{formatClock(marketRemaining)}</strong></div><p className="panel-note">螺丝固定5金币，钢筋固定50金币。</p><ShopRow title={`粗加工 ×${game.inventory.rough}`} price={game.inventory.rough * game.market.roughPrice} disabled={!game.inventory.rough} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "rough"))} /><ShopRow title={`精加工 ×${game.inventory.refined}`} price={game.inventory.refined * game.market.refinedPrice} disabled={!game.inventory.refined} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "refined"))} /><ShopRow title={`螺丝 ×${game.inventory.screws}`} price={game.inventory.screws * 5} disabled={!game.inventory.screws} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "screws"))} /><ShopRow title={`钢筋 ×${game.inventory.rebar}`} price={game.inventory.rebar * 50} disabled={!game.inventory.rebar} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "rebar"))} /><button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined && !game.inventory.screws && !game.inventory.rebar} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button></>}
-        {panel === "inventory" && <><h2>特殊物品背包</h2><p className="panel-note">陨石坑加工以较低概率掉落特殊物品，订单也可能奖励。使用时机由你决定。</p>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 60秒"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {Math.ceil(game.effects.holyLight?.remaining ?? 0)}s</div></>}
+        {panel === "inventory" && <><h2>特殊物品背包</h2><p className="panel-note">完成订单有机会获得特殊物品。使用时机由你决定。</p>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 60秒"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {Math.ceil(game.effects.holyLight?.remaining ?? 0)}s</div></>}
         {panel === "orders" && <><h2>工厂订单</h2><p className="panel-note">每180秒固定派发一张订单，最多同时保留2张，库存满足后由你主动交付。</p><div className="order-dispatch">{game.orders.length >= 2 ? "订单已满 · 交付一张后立即派发" : `下次订单派发还有 ${Math.ceil(180 - game.orderElapsed)} 秒`}</div>{game.orders.length ? game.orders.map((order) => { const ready = game.inventory[order.processed.kind] >= order.processed.amount && game.inventory[order.synthesized.kind] >= order.synthesized.amount; return <div className="order-card" key={order.id}><div><strong>{order.processed.kind === "rough" ? "粗制" : "精制"}×{order.processed.amount} + {order.synthesized.kind === "screws" ? "螺丝" : "钢筋"}×{order.synthesized.amount}</strong><span>{Math.ceil(order.remaining)}s · 奖励：{order.reward === "coins" ? `${format(orderCoinReward(game, order))}金币` : "随机特殊物品 ×1"}</span></div><button disabled={!ready} onClick={() => updateGame((current) => submitOrder(current, order.id))}>交付</button></div>; }) : <div className="empty-state">暂无订单</div>}</>}
-        {panel === "research" && <><h2>永久研究</h2><p className="panel-note">高阶研究用于消耗后期资金，并永久保存在当前存档。</p>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "radar" ? "延长陨石预警" : id === "structure" ? "缩短重建，解锁加固" : id === "medicine" ? "缩短昏迷恢复" : id === "synthesis" ? "提高合成速度" : "提高金币订单奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
+        {panel === "research" && <><h2>永久研究</h2><p className="panel-note">高阶研究用于消耗后期资金，并永久保存在当前存档。</p>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高金币订单奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
       </aside>}
 
       {placingPlot && <div className={`placement-tip ${placingPlot.valid ? "is-valid" : "is-invalid"}`}>{placingPlot.valid ? "单击放置地块 · Esc取消" : "地块发生碰撞 · Esc取消"}</div>}
@@ -1123,7 +1104,7 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
     </section>}
     <section className={`manager-section plot-manager-section ${plotsOpen ? "is-open" : ""}`}>
       <div className="manager-head"><strong>地块管理</strong><span>{plots.length}块</span><button className="manager-toggle" onClick={() => onToggle("plots")} aria-label={plotsOpen ? "缩小地块管理" : "展开地块管理"}>{plotsOpen ? "缩小" : "展开"}</button></div>
-      {plotsOpen && <div className="plot-management"><p>停用后暂停工作与机器人分配，进行中的批次会保留。</p>{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => { const grouped = plots.filter((plot) => plot.type === type); return <section className="plot-management-group" key={type}><h3>{ZONE_META[type].name}<span>{grouped.length}块</span></h3>{grouped.map((plot, index) => <div className={`plot-management-row ${plot.enabled === false ? "is-disabled" : ""}`} key={plot.id}><div><strong>{ZONE_META[type].name} {index + 1}</strong><small>{plot.cols}×{plot.rows} · {workerCounts.get(plot.id) ?? 0}/{plotCapacity(plot)}人{(plot.damagedRemaining ?? 0) > 0 ? ` · 重建${Math.ceil(plot.damagedRemaining ?? 0)}s` : ""}</small></div>{type === "process" && <select aria-label={`${plot.name}配方`} value={processPlots[plot.id]?.recipe ?? "rough"} onChange={(event) => onChangeProcessRecipe(plot.id, event.target.value as "rough" | "refined")}><option value="rough">粗加工</option><option value="refined">精加工</option></select>}{type === "synthesis" && <select aria-label={`${plot.name}配方`} value={synthesisPlots[plot.id]?.recipe ?? "cans"} onChange={(event) => onChangeSynthesisRecipe(plot.id, event.target.value as SynthesisRecipeId)}><option value="cans">罐头</option><option value="screws">螺丝</option><option value="rebar">钢筋</option></select>}<label className="plot-enabled-toggle"><input type="checkbox" checked={plot.enabled !== false} onChange={() => onTogglePlot(plot.id)} /><span>{plot.enabled === false ? "未启用" : "已启用"}</span></label></div>)}</section>; })}</div>}
+      {plotsOpen && <div className="plot-management"><p>停用后暂停工作与机器人分配，进行中的批次会保留。</p>{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => { const grouped = plots.filter((plot) => plot.type === type); return <section className="plot-management-group" key={type}><h3>{ZONE_META[type].name}<span>{grouped.length}块</span></h3>{grouped.map((plot, index) => <div className={`plot-management-row ${plot.enabled === false ? "is-disabled" : ""}`} key={plot.id}><div><strong>{ZONE_META[type].name} {index + 1}</strong><small>{plot.cols}×{plot.rows} · {workerCounts.get(plot.id) ?? 0}/{plotCapacity(plot)}人</small></div>{type === "process" && <select aria-label={`${plot.name}配方`} value={processPlots[plot.id]?.recipe ?? "rough"} onChange={(event) => onChangeProcessRecipe(plot.id, event.target.value as "rough" | "refined")}><option value="rough">粗加工</option><option value="refined">精加工</option></select>}{type === "synthesis" && <select aria-label={`${plot.name}配方`} value={synthesisPlots[plot.id]?.recipe ?? "cans"} onChange={(event) => onChangeSynthesisRecipe(plot.id, event.target.value as SynthesisRecipeId)}><option value="cans">罐头</option><option value="screws">螺丝</option><option value="rebar">钢筋</option></select>}<label className="plot-enabled-toggle"><input type="checkbox" checked={plot.enabled !== false} onChange={() => onTogglePlot(plot.id)} /><span>{plot.enabled === false ? "未启用" : "已启用"}</span></label></div>)}</section>; })}</div>}
     </section>
   </aside>;
 }
