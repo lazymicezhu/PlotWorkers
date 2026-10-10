@@ -294,6 +294,18 @@ export default function Home() {
   const selectedProcessState = selectedProcessPlot ? game.processPlots[selectedProcessPlot.id] : null;
   const selectedSynthesisPlot = game.plots.find((plot) => plot.id === selectedSynthesisPlotId && plot.type === "synthesis");
   const selectedSynthesisState = selectedSynthesisPlot ? game.synthesisPlots[selectedSynthesisPlot.id] : null;
+  const synthesisProgress = selectedSynthesisState?.batch.active
+    ? Math.max(0, Math.min(1, selectedSynthesisState.batch.progress)) * 100
+    : 0;
+  const synthesisPercent = Math.floor(synthesisProgress);
+  let synthesisStatus = "等待开工";
+  if (selectedSynthesisPlot && selectedSynthesisState) {
+    const hasWorker = game.workers.some((worker) => worker.zoneId === selectedSynthesisPlot.id && worker.mood > 0 && worker.status !== "dragging" && worker.status !== "slacking");
+    if (selectedSynthesisPlot.enabled === false) synthesisStatus = "已停用";
+    else if (selectedSynthesisState.batch.active) synthesisStatus = hasWorker ? "合成中" : "暂停 · 等待工人";
+    else if (!Object.entries(SYNTHESIS_RECIPES[selectedSynthesisState.recipe].inputs).every(([kind, amount]) => game.inventory[kind as "rough" | "refined" | "screws"] >= amount)) synthesisStatus = "等待材料";
+    else if (!hasWorker) synthesisStatus = "等待工人";
+  }
   const visibleBounds = useMemo(() => {
     const margin = 240;
     const centerX = WORLD_W / 2 - camera.x / zoom;
@@ -1024,7 +1036,13 @@ export default function Home() {
       {panel && <aside className={`floating-panel ${panel === "shop" ? "shop-panel" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
         <button className="panel-close" onClick={() => { setPanel(null); cancelPurchasedPlot(); }} aria-label="关闭">×</button>
         {panel === "process" && selectedProcessPlot && selectedProcessState && <><h2>{selectedProcessPlot.name}配方</h2><p className="panel-note">这里只统计当前地块。切换配方会退回该地块批次原料，并重置该地块的生产数量。</p>{(["rough", "refined"] as const).map((recipeId) => { const recipe = RECIPES[recipeId]; return <button className={`panel-option ${selectedProcessState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeRecipe(current, selectedProcessPlot.id, recipeId))}><strong>{recipe.name}</strong><span>{recipe.raw} 原料 · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{RECIPES[selectedProcessState.recipe].name}产品</span><strong>{selectedProcessState.produced}件</strong></div></>}
-        {panel === "synthesis" && selectedSynthesisPlot && selectedSynthesisState && <><h2>{selectedSynthesisPlot.name}配方</h2><p className="panel-note">人物共同贡献合成速度。切换配方会退回本批材料并重置本地块产量。</p>{(["cans", "screws", "rebar"] as SynthesisRecipeId[]).map((recipeId) => { const recipe = SYNTHESIS_RECIPES[recipeId]; const materials = Object.entries(recipe.inputs).map(([kind, amount]) => `${kind === "rough" ? "粗制" : kind === "refined" ? "精制" : "螺丝"}${amount}`).join(" + "); return <button className={`panel-option ${selectedSynthesisState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeSynthesisRecipe(current, selectedSynthesisPlot.id, recipeId))}><strong>{recipe.name} ×{recipe.output}</strong><span>{materials} · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}</span><strong>{selectedSynthesisState.produced}件</strong></div></>}
+        {panel === "synthesis" && selectedSynthesisPlot && selectedSynthesisState && <><h2>{selectedSynthesisPlot.name}配方</h2><p className="panel-note">人物共同贡献合成速度。切换配方会退回本批材料并重置本地块产量。</p>{(["cans", "screws", "rebar"] as SynthesisRecipeId[]).map((recipeId) => { const recipe = SYNTHESIS_RECIPES[recipeId]; const materials = Object.entries(recipe.inputs).map(([kind, amount]) => `${kind === "rough" ? "粗制" : kind === "refined" ? "精制" : "螺丝"}${amount}`).join(" + "); return <button className={`panel-option ${selectedSynthesisState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeSynthesisRecipe(current, selectedSynthesisPlot.id, recipeId))}><strong>{recipe.name} ×{recipe.output}</strong><span>{materials} · {recipe.seconds}秒</span></button>; })}<div className="production-summary synthesis-production">
+          <div className="synthesis-production-total"><span>本地块生产的{SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}</span><strong>{selectedSynthesisState.produced}件</strong></div>
+          <div className="synthesis-progress-label"><span>当前批次 · {synthesisStatus}</span><span>{synthesisPercent}%</span></div>
+          <div className="synthesis-progress-track" role="progressbar" aria-label={`${selectedSynthesisPlot.name}当前批次合成进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={synthesisPercent} aria-valuetext={`${synthesisStatus}，${synthesisPercent}%`}>
+            <div className="synthesis-progress-fill" style={{ width: `${synthesisProgress}%` }} />
+          </div>
+        </div></>}
         {panel === "shop" && <>
           <h2>生活商店</h2>
           <p className="panel-note">购买补给、人物和限时自动化服务。</p>

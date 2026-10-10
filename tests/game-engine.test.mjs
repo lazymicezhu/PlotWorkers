@@ -496,6 +496,65 @@ test("synthesis batches reserve ingredients, produce cans and refund on recipe c
   assert.equal(completed.inventory.cans, 40);
 });
 
+test("selling all products keeps screw and rebar batches reserved and able to finish", () => {
+  for (const kind of ["screws", "rebar"]) {
+    const recipe = SYNTHESIS_RECIPES[kind];
+    let game = state();
+    game.coins = 300;
+    game = buyPlot(game, { id: "synth", type: "synthesis", name: "合成区", x: 0, y: 0, cols: 4, rows: 4, purchasePrice: 0 });
+    game = changeSynthesisRecipe(game, "synth", kind);
+    Object.assign(game.inventory, { rough: 7, refined: 3, screws: 4, rebar: 2 });
+    for (const [input, amount] of Object.entries(recipe.inputs)) game.inventory[input] += amount;
+    game.workers[0] = { ...game.workers[0], zoneId: "synth", status: "idle", mood: 100, stamina: 10, personality: "lazy" };
+
+    const started = stepGame(game, 1, () => 1);
+    assert.deepEqual(started.synthesisPlots.synth.batch.reserved, recipe.inputs);
+    assert.deepEqual([started.inventory.rough, started.inventory.refined, started.inventory.screws, started.inventory.rebar], [7, 3, 4, 2]);
+
+    let sold = sellProducts(started, "all");
+    assert.equal(sold.coins - started.coins, 380);
+    assert.deepEqual([sold.inventory.rough, sold.inventory.refined, sold.inventory.screws, sold.inventory.rebar], [0, 0, 0, 0]);
+    assert.deepEqual(sold.synthesisPlots.synth.batch, started.synthesisPlots.synth.batch);
+    sold = stepGame(sold, 1, () => 1);
+    assert.ok(sold.synthesisPlots.synth.batch.progress > started.synthesisPlots.synth.batch.progress);
+
+    for (let second = 0; second < 200 && sold.synthesisPlots.synth.batch.active; second += 1) sold = stepGame(sold, 1, () => 1);
+    assert.equal(sold.inventory[kind], recipe.output);
+    assert.equal(sold.synthesisPlots.synth.produced, recipe.output);
+    assert.deepEqual(sold.synthesisPlots.synth.batch, { active: false, progress: 0, reserved: {} });
+    const waiting = stepGame(sold, 1, () => 1);
+    assert.equal(waiting.workers[0].status, "waiting");
+    assert.equal(waiting.synthesisPlots.synth.batch.active, false);
+    assert.equal(waiting.inventory[kind], recipe.output);
+  }
+});
+
+test("saved paused synthesis batches keep ingredients unavailable to orders and refund them on recipe changes", async () => {
+  const { parseSavedState } = await import("../app/game-engine.ts");
+  let game = state();
+  game.coins = 300;
+  game = buyPlot(game, { id: "synth", type: "synthesis", name: "合成区", x: 0, y: 0, cols: 4, rows: 4, purchasePrice: 0 });
+  game = changeSynthesisRecipe(game, "synth", "rebar");
+  Object.assign(game.inventory, SYNTHESIS_RECIPES.rebar.inputs);
+  game.workers[0] = { ...game.workers[0], zoneId: "synth", status: "idle", mood: 100 };
+  game.orders = [{ id: "reserved-order", remaining: 300, processed: { kind: "rough", amount: 1 }, synthesized: { kind: "screws", amount: 1 }, reward: "coins" }];
+  const started = stepGame(game, 1, () => 1);
+  const restored = parseSavedState(JSON.stringify(togglePlotEnabled(started, "synth")));
+  assert.deepEqual(restored.synthesisPlots.synth.batch, started.synthesisPlots.synth.batch);
+  assert.deepEqual([restored.inventory.rough, restored.inventory.refined, restored.inventory.screws], [0, 0, 0]);
+  assert.equal(submitOrder(restored, "reserved-order"), restored);
+
+  const paused = stepGame(restored, 1, () => 1);
+  assert.deepEqual(paused.synthesisPlots.synth.batch, started.synthesisPlots.synth.batch);
+  const resumed = stepGame(togglePlotEnabled(paused, "synth"), 1, () => 1);
+  assert.ok(resumed.synthesisPlots.synth.batch.progress > paused.synthesisPlots.synth.batch.progress);
+
+  const refunded = changeSynthesisRecipe(resumed, "synth", "screws");
+  assert.deepEqual([refunded.inventory.rough, refunded.inventory.refined, refunded.inventory.screws], [10, 5, 2]);
+  assert.deepEqual(refunded.synthesisPlots.synth.batch, { active: false, progress: 0, reserved: {} });
+  assert.deepEqual(changeSynthesisRecipe(refunded, "synth", "cans").inventory, refunded.inventory);
+});
+
 test("synthesis recipes take three times their original duration", () => {
   assert.deepEqual(Object.values(SYNTHESIS_RECIPES).map((recipe) => recipe.seconds), [60, 90, 135]);
 });
