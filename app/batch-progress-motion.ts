@@ -8,17 +8,17 @@ export type BatchSnapshot = {
 export type BatchMotion = {
   recipe: string;
   position: number;
+  cursor: number;
   target: number;
   value: number;
   phase: "idle" | "moving" | "full" | "reset";
-  holdMs: number;
-  fullHoldMs: number;
-  speed: number;
+  remainingMs: number;
 };
 
 const EPSILON = 1e-9;
-const SAMPLE_MS = 1000;
-const FULL_HOLD_MS = 40;
+// Keep a small reserve of already confirmed work between one-second samples.
+// It absorbs normal delivery jitter without predicting future production.
+const PLAYBACK_MS = 1150;
 
 function snapshotPosition(snapshot: BatchSnapshot) {
   const completed = Math.max(0, Math.floor(snapshot.completed));
@@ -30,12 +30,11 @@ export function createBatchMotion(snapshot: BatchSnapshot): BatchMotion {
   return {
     recipe: snapshot.recipe,
     position,
+    cursor: position,
     target: position,
     value: snapshot.active ? Math.max(0, Math.min(1, snapshot.progress)) : 0,
     phase: snapshot.active && snapshot.progress >= 1 ? "full" : "idle",
-    holdMs: 0,
-    fullHoldMs: FULL_HOLD_MS,
-    speed: 0,
+    remainingMs: 0,
   };
 }
 
@@ -46,17 +45,10 @@ export function updateBatchMotion(motion: BatchMotion, snapshot: BatchSnapshot):
   }
   // Both views can publish the same snapshot; neither should restart the clock.
   if (Math.abs(target - motion.target) < EPSILON) return motion;
-  const crossings = Math.max(0, Math.floor(target + EPSILON) - Math.floor(motion.position + EPSILON));
-  // Fast factories still paint full and empty separately, but extra full-frame
-  // dwell would otherwise build an ever-growing queue of completed batches.
-  const fullHoldMs = target - motion.position > 4 ? 0 : FULL_HOLD_MS;
-  // Budget an empty frame and the frame rounded up at each full boundary.
-  const movementMs = Math.max(160, SAMPLE_MS - crossings * (fullHoldMs + 2 * 1000 / 60));
   return {
     ...motion,
     target,
-    speed: (target - motion.position) / movementMs,
-    fullHoldMs,
+    remainingMs: PLAYBACK_MS,
     phase: motion.phase === "idle" ? "moving" : motion.phase,
   };
 }
@@ -65,24 +57,27 @@ export function advanceBatchMotion(motion: BatchMotion, deltaMs: number): BatchM
   if (motion.phase === "idle") return motion;
   // A stalled frame must not skip several whole batches on the next paint.
   const elapsed = Math.max(0, Math.min(50, deltaMs));
+  if (elapsed === 0) return motion;
+  const remainingMs = Math.max(0, motion.remainingMs - elapsed);
+  // The continuous cursor keeps moving while a full or empty frame is painted,
+  // so crossing a batch boundary never throws away interpolation time. Both the
+  // cursor and the visible position are bounded by the confirmed target.
+  const fraction = motion.remainingMs > 0 ? Math.min(1, elapsed / motion.remainingMs) : 1;
+  const cursor = Math.min(motion.target, motion.cursor + (motion.target - motion.cursor) * fraction);
   if (motion.phase === "full") {
-    const holdMs = motion.holdMs + elapsed;
-    return holdMs < motion.fullHoldMs
-      ? { ...motion, holdMs }
-      : { ...motion, phase: "reset", value: 0, holdMs: 0 };
+    return { ...motion, cursor, remainingMs, phase: "reset", value: 0 };
   }
   if (motion.position >= motion.target - EPSILON) {
-    return { ...motion, phase: "idle", value: 0 };
+    return { ...motion, cursor, remainingMs, phase: "idle", value: 0 };
   }
 
-  const position = Math.min(motion.target, motion.position + motion.speed * elapsed);
   const boundary = Math.floor(motion.position + EPSILON) + 1;
   // Stop at EVERY boundary. Full and empty frames are painted separately before
   // advancing again, even if a single simulation tick completed several batches.
-  if (boundary <= motion.target + EPSILON && position >= boundary - EPSILON) {
-    return { ...motion, position: boundary, value: 1, phase: "full", holdMs: 0 };
+  if (boundary <= motion.target + EPSILON && cursor >= boundary - EPSILON) {
+    return { ...motion, cursor, remainingMs, position: boundary, value: 1, phase: "full" };
   }
-  const arrived = position >= motion.target - EPSILON;
-  const next = arrived ? motion.target : position;
-  return { ...motion, position: next, value: next % 1, phase: arrived ? "idle" : "moving" };
+  const arrived = cursor >= motion.target - EPSILON;
+  const next = arrived ? motion.target : cursor;
+  return { ...motion, cursor, remainingMs, position: next, value: next % 1, phase: arrived ? "idle" : "moving" };
 }

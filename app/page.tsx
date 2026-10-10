@@ -61,7 +61,7 @@ import {
   useSpecialItem as consumeSpecialItem,
   workerPurchasePrice,
 } from "./game-engine";
-import { simulateElapsed } from "./simulation-protocol";
+import { reconcileSimulation, simulateElapsed } from "./simulation-protocol";
 import type { SimulationStepRequest, SimulationStepResponse } from "./simulation-protocol";
 import SimulationWorker from "./simulation.worker?worker";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
@@ -336,9 +336,9 @@ export default function Home() {
       startTransition(() => {
         setGame((current) => {
           pendingSimulationRef.current = null;
-          if (current !== pending.base) return current;
+          const next = reconcileSimulation(pending.base, current, event.data.state, pending.seconds);
           unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
-          return event.data.state;
+          return next;
         });
       });
     };

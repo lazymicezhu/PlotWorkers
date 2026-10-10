@@ -25,6 +25,8 @@ function assertCycles(frames, completed) {
   for (const frame of frames) {
     assert.ok(frame.value >= 0 && frame.value <= 1);
     assert.ok(frame.position <= frame.target + 1e-9, "animation must not invent future production");
+    assert.ok(frame.cursor <= frame.target + 1e-9, "the interpolation cursor must not predict future production");
+    assert.ok(frame.position <= frame.cursor + 1e-9, "visible progress cannot overtake confirmed playback");
     if (frame.phase === "full") assert.equal(frame.value, 1);
     if (frame.phase === "reset") assert.equal(frame.value, 0);
   }
@@ -68,13 +70,13 @@ test("a completed batch still fills when missing materials leave production inac
   assert.deepEqual(advanceBatchMotion(frames.at(-1), 5000), frames.at(-1));
 });
 
-test("ordinary progress advances continuously for one second and never predicts beyond its target", () => {
+test("ordinary progress advances linearly through its playback reserve without predicting future production", () => {
   let motion = updateBatchMotion(createBatchMotion(snapshot(0, .2)), snapshot(0, .7));
-  for (let frame = 1; frame <= 100; frame += 1) {
+  for (let frame = 1; frame <= 115; frame += 1) {
     const previous = motion;
     motion = advanceBatchMotion(motion, 10);
     assert.ok(motion.value > previous.value, "every frame should advance during interpolation");
-    closeTo(motion.value, .2 + .5 * frame / 100);
+    closeTo(motion.value, .2 + .5 * frame / 115);
     assert.ok(motion.position <= motion.target);
   }
   assert.equal(motion.phase, "idle");
@@ -109,19 +111,19 @@ test("changing recipes or rolling back progress discards pending cycles and alig
   }
 });
 
-test("full progress stays visible for at least forty milliseconds before an empty frame", () => {
+test("full and empty progress each get one frame without an artificial end-of-batch hold", () => {
   let motion = updateBatchMotion(createBatchMotion(snapshot(0, .94)), snapshot(1, .08));
   for (let frame = 0; motion.phase !== "full" && frame < 2000; frame += 1) motion = advanceBatchMotion(motion, 16);
   assert.equal(motion.phase, "full");
-  for (let elapsed = 10; elapsed < 40; elapsed += 10) {
-    motion = advanceBatchMotion(motion, 10);
-    assert.equal(motion.phase, "full");
-    assert.equal(motion.value, 1);
-  }
-  const frames = play(motion, 10);
-  const firstNonFull = frames.find((frame) => frame.phase !== "full");
-  assert.equal(firstNonFull.phase, "reset");
-  assert.equal(firstNonFull.value, 0);
+  assert.equal(advanceBatchMotion(motion, 0), motion, "a zero-time scheduler callback is not another painted frame");
+  const fullCursor = motion.cursor;
+  motion = advanceBatchMotion(motion, 1000 / 120);
+  assert.equal(motion.phase, "reset");
+  assert.equal(motion.value, 0);
+  assert.ok(motion.cursor > fullCursor, "interpolation time must not be discarded at the full boundary");
+  motion = advanceBatchMotion(motion, 1000 / 120);
+  assert.equal(motion.phase, "moving");
+  assert.ok(motion.value > 0);
 });
 
 test("long frames cannot skip complete or empty boundary frames", () => {
@@ -141,7 +143,10 @@ test("successive one-second snapshots stay continuous and preserve every batch r
     for (let frame = 0; frame < 50; frame += 1) {
       const before = motion;
       motion = advanceBatchMotion(motion, 20);
-      assert.ok(motion.position - before.position < .01, "a new snapshot must not create a visual jump");
+      assert.ok(motion.cursor - before.cursor < .01, "a new snapshot must not create an interpolation jump");
+      if (before.phase !== "reset") {
+        assert.ok(motion.position - before.position < .01, "ordinary frames must keep advancing smoothly");
+      }
       frames.push(motion);
     }
   }
@@ -156,7 +161,7 @@ test("a maximum-speed factory preserves every cycle for a minute without accumul
   const deltaMs = 1000 / 60;
   let motion = createBatchMotion(snapshot(0, 0, true, "rough"));
   const frames = [motion];
-  let maximumSettledLag = 0;
+  const settledLags = [];
   for (let second = 1; second <= seconds; second += 1) {
     const target = batchesPerSecond * second;
     motion = updateBatchMotion(motion, snapshot(Math.floor(target), target % 1, true, "rough"));
@@ -166,28 +171,66 @@ test("a maximum-speed factory preserves every cycle for a minute without accumul
     }
     // Measure after the one-second playback window, not immediately after a
     // snapshot legitimately adds more than fifteen confirmed batches.
-    maximumSettledLag = Math.max(maximumSettledLag, target - motion.position);
+    settledLags.push(target - motion.position);
   }
   frames.push(...play(motion, deltaMs).slice(1));
   const finalTarget = batchesPerSecond * seconds;
   assertCycles(frames, Array.from({ length: Math.floor(finalTarget) }, (_, index) => index + 1));
   closeTo(frames.at(-1).position, finalTarget);
   closeTo(frames.at(-1).value, finalTarget % 1);
-  assert.ok(maximumSettledLag <= 2, `playback fell ${maximumSettledLag} batches behind after a one-second window`);
+  const maximumSettledLag = Math.max(...settledLags);
+  assert.ok(maximumSettledLag <= 3.5, `playback fell ${maximumSettledLag} batches behind after a one-second window`);
+  const earlyLag = Math.max(...settledLags.slice(10, 30));
+  const lateLag = Math.max(...settledLags.slice(40));
+  assert.ok(lateLag <= earlyLag + .5, "steady playback must not accumulate a growing queue");
 });
+
+for (const fps of [60, 120]) {
+  for (const batchesPerSecond of [1, 4, 8, 15.36]) {
+    for (const jitter of [0, 40]) {
+      test(`${fps} Hz at ${batchesPerSecond} batches/second with ±${jitter}ms delivery jitter stays in motion`, () => {
+        const seconds = 45;
+        const deltaMs = 1000 / fps;
+        const deliveryTime = (second) => second * 1000 + (second % 2 ? -jitter : jitter);
+        let motion = createBatchMotion(snapshot(0, .123));
+        let nextSample = 1;
+        const frames = [motion];
+        for (let frame = 1; frame * deltaMs <= deliveryTime(seconds) + 900; frame += 1) {
+          const now = frame * deltaMs;
+          if (nextSample <= seconds && now + 1e-9 >= deliveryTime(nextSample)) {
+            const target = .123 + nextSample * batchesPerSecond;
+            const previous = motion;
+            motion = updateBatchMotion(motion, snapshot(Math.floor(target), target % 1));
+            closeTo(motion.position, previous.position);
+            closeTo(motion.value, previous.value);
+            nextSample += 1;
+          }
+          if (nextSample === 1) continue;
+          motion = advanceBatchMotion(motion, deltaMs);
+          assert.notEqual(motion.phase, "idle", "confirmed-work playback must bridge successive samples without stopping");
+          frames.push(motion);
+        }
+        const drained = play(motion, deltaMs);
+        assert.ok((drained.length - 1) * deltaMs < 1500, "stopped production must settle promptly");
+        frames.push(...drained.slice(1));
+        const finalTarget = .123 + seconds * batchesPerSecond;
+        assertCycles(frames, Array.from({ length: Math.floor(finalTarget) }, (_, index) => index + 1));
+        closeTo(frames.at(-1).position, finalTarget);
+        closeTo(frames.at(-1).value, finalTarget % 1);
+      });
+    }
+  }
+}
 
 test("new snapshots during full and reset frames preserve those frames and append later batches", () => {
   let motion = updateBatchMotion(createBatchMotion(snapshot(0, .94)), snapshot(1, .08));
   for (let frame = 0; motion.phase !== "full" && frame < 2000; frame += 1) motion = advanceBatchMotion(motion, 16);
   assert.equal(motion.phase, "full");
-  motion = advanceBatchMotion(motion, 20);
   motion = updateBatchMotion(motion, snapshot(2, .2));
   assert.equal(motion.phase, "full");
   assert.equal(motion.value, 1);
-  motion = advanceBatchMotion(motion, 19);
-  assert.equal(motion.phase, "full");
-  motion = advanceBatchMotion(motion, 1);
-  assert.equal(motion.phase, "reset", "a new snapshot must not restart the full-frame hold");
+  motion = advanceBatchMotion(motion, 16);
+  assert.equal(motion.phase, "reset", "a new snapshot must not restart or extend the full frame");
   motion = updateBatchMotion(motion, snapshot(3, .25));
   assert.equal(motion.phase, "reset");
   assert.equal(motion.value, 0);
@@ -213,13 +256,10 @@ test("opening at exactly full progress holds and resets even when the next snaps
   assert.equal(motion.position, 8);
   assert.equal(motion.value, 1);
   assert.equal(motion.phase, "full");
-  motion = advanceBatchMotion(motion, 20);
   motion = updateBatchMotion(motion, snapshot(8, 0, false));
   assert.equal(motion.phase, "full");
   assert.equal(motion.value, 1);
-  motion = advanceBatchMotion(motion, 19);
-  assert.equal(motion.phase, "full");
-  motion = advanceBatchMotion(motion, 1);
+  motion = advanceBatchMotion(motion, 16);
   assert.equal(motion.phase, "reset");
   assert.equal(motion.value, 0);
   const frames = play(motion);
