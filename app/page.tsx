@@ -65,6 +65,7 @@ import { simulateElapsed } from "./simulation-protocol";
 import type { SimulationStepRequest, SimulationStepResponse } from "./simulation-protocol";
 import SimulationWorker from "./simulation.worker?worker";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
+import { BatchProgressBackground } from "./batch-progress";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -1037,7 +1038,7 @@ export default function Home() {
         <button className="panel-close" onClick={() => { setPanel(null); cancelPurchasedPlot(); }} aria-label="关闭">×</button>
         {panel === "process" && selectedProcessPlot && selectedProcessState && <><h2>{selectedProcessPlot.name}配方</h2><p className="panel-note">这里只统计当前地块。切换配方会退回该地块批次原料，并重置该地块的生产数量。</p>{(["rough", "refined"] as const).map((recipeId) => { const recipe = RECIPES[recipeId]; return <button className={`panel-option ${selectedProcessState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeRecipe(current, selectedProcessPlot.id, recipeId))}><strong>{recipe.name}</strong><span>{recipe.raw} 原料 · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{RECIPES[selectedProcessState.recipe].name}产品</span><strong>{selectedProcessState.produced}件</strong></div></>}
         {panel === "synthesis" && selectedSynthesisPlot && selectedSynthesisState && <><h2>{selectedSynthesisPlot.name}配方</h2><p className="panel-note">人物共同贡献合成速度。切换配方会退回本批材料并重置本地块产量。</p>{(["cans", "screws", "rebar"] as SynthesisRecipeId[]).map((recipeId) => { const recipe = SYNTHESIS_RECIPES[recipeId]; const materials = Object.entries(recipe.inputs).map(([kind, amount]) => `${kind === "rough" ? "粗制" : kind === "refined" ? "精制" : "螺丝"}${amount}`).join(" + "); return <button className={`panel-option ${selectedSynthesisState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeSynthesisRecipe(current, selectedSynthesisPlot.id, recipeId))}><strong>{recipe.name} ×{recipe.output}</strong><span>{materials} · {recipe.seconds}秒</span></button>; })}<div className="production-summary has-batch-progress" role="progressbar" aria-label={`${selectedSynthesisPlot.name}当前批次合成进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={synthesisPercent} aria-valuetext={`${synthesisStatus}，${synthesisPercent}%；本地块已生产${SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}${selectedSynthesisState.produced}件`} title={`${synthesisStatus} · ${synthesisPercent}%`}>
-          <BatchProgressBackground key={`${selectedSynthesisPlot.id}:${selectedSynthesisState.recipe}:${selectedSynthesisState.produced}:${selectedSynthesisState.batch.active}`} progress={synthesisProgress} animate={synthesisStatus === "合成中"} />
+          <BatchProgressBackground plotId={selectedSynthesisPlot.id} recipe={selectedSynthesisState.recipe} completed={selectedSynthesisState.produced / SYNTHESIS_RECIPES[selectedSynthesisState.recipe].output} progress={selectedSynthesisState.batch.progress} active={selectedSynthesisState.batch.active} />
           <span>本地块生产的{SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}</span><strong>{selectedSynthesisState.produced}件</strong>
         </div></>}
         {panel === "shop" && <>
@@ -1065,10 +1066,6 @@ export default function Home() {
       {notice && <div className={`notice ${plotDraft ? "is-above-recycle" : ""}`}>{notice}</div>}
     </main>
   );
-}
-
-function BatchProgressBackground({ progress, animate }: { progress: number; animate: boolean }) {
-  return <span className="batch-progress-fill" aria-hidden="true" style={{ transform: `scaleX(${progress / 100})`, transition: animate ? undefined : "none" }} />;
 }
 
 function Resource({ label, value, accent = false, warning = false }: { label: string; value: number | string; accent?: boolean; warning?: boolean }) {
@@ -1112,7 +1109,6 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
   const workersOpen = activeSection === "workers";
   const robotsOpen = activeSection === "robots";
   const plotsOpen = activeSection === "plots";
-  const workingPlotIds = useMemo(() => new Set(workers.filter((worker) => worker.zoneId && worker.mood > 0 && worker.status !== "dragging" && worker.status !== "slacking").map((worker) => worker.zoneId)), [workers]);
   return <aside className="worker-manager" onPointerDown={(event) => event.stopPropagation()}>
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
     <div className="manager-head"><strong>人物管理</strong><span>{workers.length}人</span><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
@@ -1132,7 +1128,7 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
         const progress = batch?.active ? Math.max(0, Math.min(1, batch.progress)) * 100 : 0;
         const progressLabel = hasProgress ? `${ZONE_META[type].name} ${index + 1}，本批进度 ${Math.floor(progress)}%${plot.enabled === false ? "，已停用" : ""}` : undefined;
         return <div className={`plot-management-row ${hasProgress ? "has-batch-progress" : ""} ${plot.enabled === false ? "is-disabled" : ""}`} role={hasProgress ? "group" : undefined} aria-label={progressLabel} title={progressLabel} key={plot.id}>
-          {production && <BatchProgressBackground key={`${plot.id}:${production.recipe}:${production.produced}:${production.batch.active}`} progress={progress} animate={plot.enabled !== false && production.batch.active && workingPlotIds.has(plot.id)} />}
+          {production && <BatchProgressBackground plotId={plot.id} recipe={production.recipe} completed={production.produced / (type === "synthesis" ? SYNTHESIS_RECIPES[production.recipe as SynthesisRecipeId].output : 1)} progress={production.batch.progress} active={production.batch.active} />}
           <div><strong>{ZONE_META[type].name} {index + 1}</strong><small>{plot.cols}×{plot.rows} · {workerCounts.get(plot.id) ?? 0}/{plotCapacity(plot)}人</small></div>{type === "process" && <select aria-label={`${plot.name}配方`} value={processPlots[plot.id]?.recipe ?? "rough"} onChange={(event) => onChangeProcessRecipe(plot.id, event.target.value as "rough" | "refined")}><option value="rough">粗加工</option><option value="refined">精加工</option></select>}{type === "synthesis" && <select aria-label={`${plot.name}配方`} value={synthesisPlots[plot.id]?.recipe ?? "cans"} onChange={(event) => onChangeSynthesisRecipe(plot.id, event.target.value as SynthesisRecipeId)}><option value="cans">罐头</option><option value="screws">螺丝</option><option value="rebar">钢筋</option></select>}<label className="plot-enabled-toggle"><input type="checkbox" checked={plot.enabled !== false} onChange={() => onTogglePlot(plot.id)} /><span>{plot.enabled === false ? "未启用" : "已启用"}</span></label></div>;
       })}</section>; })}</div>}
     </section>

@@ -443,8 +443,7 @@ button { font: inherit; }
 .production-summary { display: flex; align-items: center; justify-content: space-between; margin-top: 14px; padding: 12px; border-radius: 11px; color: #687369; background: #f4f6f2; font-size: 12px; }
 .production-summary strong { color: #344238; font-size: 18px; }
 .has-batch-progress { position: relative; isolation: isolate; }
-.batch-progress-fill { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: rgba(99, 132, 88, .1); transform-origin: left center; transition: transform 1s linear; pointer-events: none; }
-@media (prefers-reduced-motion: reduce) { .batch-progress-fill { transition: none; } }
+.batch-progress-fill { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: rgba(99, 132, 88, .1); transform-origin: left center; pointer-events: none; }
 .floating-panel small { display: block; margin-top: 7px; color: #7d887f; }
 
 .shop-row { display: grid; grid-template-columns: minmax(0, 1fr) 112px; align-items: center; gap: 10px; height: 52px; padding: 0; border-bottom: 1px solid #edf0eb; }
