@@ -20,6 +20,7 @@ export type WorkerStatus =
 export type WorkerState = {
   id: string;
   name: string;
+  role?: "foreman";
   mood: number;
   stamina: number;
   efficiency: number;
@@ -35,6 +36,7 @@ export type WorkerState = {
   facing: "left" | "right";
   continuousWork: number;
   lazyElapsed: number;
+  lazyCheckInterval?: number;
   slowStacks: number;
   lastWorkZoneId: ZoneId | null;
 };
@@ -85,7 +87,8 @@ export type TimedEffectsState = {
 };
 
 export type GameState = {
-  version: 8;
+  version: 9;
+  rebirthCount: 0 | 1;
   coins: number;
   inventory: {
     raw: number;
@@ -185,7 +188,18 @@ export function recoveryRate(spirit: number) {
   return 2 * clamp(1 + (spirit - 5) * .1, .6, 1.5);
 }
 
+export function isForeman(worker: Pick<WorkerState, "role">) {
+  return worker.role === "foreman";
+}
+
+export function guardedPlotIds(workers: WorkerState[]): Set<string> {
+  return new Set(workers
+    .filter((worker) => isForeman(worker) && worker.zoneId && worker.status !== "dragging")
+    .map((worker) => worker.zoneId!));
+}
+
 function personalityRate(worker: WorkerState, zoneLeaderCount: number) {
+  if (isForeman(worker)) return 1;
   const otherLeaders = zoneLeaderCount - (worker.personality === "leader" ? 1 : 0);
   const leaderRate = 1 - (worker.personality === "leader" ? .1 : 0) + otherLeaders * .1;
   const slowBuff = worker.personality === "slowBurn" ? 1 + worker.slowStacks * .05 : 1;
@@ -222,7 +236,8 @@ export function createInitialWorker(x: number, y: number): WorkerState {
 
 export function createInitialState(x: number, y: number): GameState {
   return {
-    version: 8,
+    version: 9,
+    rebirthCount: 0,
     coins: 100,
     inventory: { raw: 0, cans: 20, rough: 0, refined: 0, screws: 0, rebar: 0, specials: { canOpener: 0, smartLeader: 0, holyLight: 0 } },
     plots: INITIAL_PLOTS.map((plot) => ({ ...plot })),
@@ -511,7 +526,8 @@ export function chooseAutoDispatch(
   reservedTargetIds: string[] = [],
   duties: SchedulerRobotState["duties"] = { rest: true, work: true, wake: true },
 ): { workerId: string; targetId: string; action: "rest" | "work" | "wake" } | null {
-  const busy = new Set(busyWorkerIds);
+  // Foremen occupy ordinary work slots, but their placement is always manual.
+  const busy = new Set([...busyWorkerIds, ...state.workers.filter(isForeman).map((worker) => worker.id)]);
   const capacity = (plot: PlotState) => Math.floor(plot.cols * plot.rows / 4);
   const plotTypes = new Map(state.plots.map((plot) => [plot.id, plot.type]));
   const occupancyByPlot = new Map<string, number>();
@@ -691,21 +707,31 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
   const workZones: ZoneType[] = ["gather", "process", "synthesis"];
   const holyPlot = (plot: PlotState) => Boolean(effects.holyLight && circleHitsPlot(effects.holyLight.x, effects.holyLight.y, 8, plot));
+  const guarded = guardedPlotIds(workers);
+  const productionMultiplier = (plot: PlotState, holy: boolean) => 1 + Number(holy) + Number(guarded.has(plot.id));
   for (const worker of workers) {
     if (worker.status === "dragging") continue;
+    if (isForeman(worker)) {
+      worker.mood = 100;
+      worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
+      delete worker.lazyCheckInterval;
+      if (worker.status === "slacking" || worker.status === "exhausted") worker.status = "idle";
+    }
     const plot = worker.zoneId ? plotById.get(worker.zoneId) : undefined;
     const zoneType = plot?.type;
-    if (!plot || !zoneType) { worker.status = "idle"; worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0; continue; }
+    if (!plot || !zoneType) { worker.status = "idle"; worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0; delete worker.lazyCheckInterval; continue; }
     if (plot.enabled === false) {
       worker.status = "idle";
       worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
+      delete worker.lazyCheckInterval;
       continue;
     }
     if (zoneType === "living") {
       worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
+      delete worker.lazyCheckInterval;
       if (worker.mood >= 100) { worker.mood = 100; worker.status = "ready"; }
       else if (inventory.cans > 0) {
-        const rate = recoveryRate(worker.spirit) * (effects.canOpener > 0 || state.canOpenerSeconds > 0 ? 1.5 : 1);
+        const rate = recoveryRate(worker.spirit) * (effects.canOpener > 0 || state.canOpenerSeconds > 0 ? 1.5 : 1) * (guarded.has(plot.id) ? 2 : 1);
         const actualSeconds = Math.min(dt, (100 - worker.mood) / rate, inventory.cans / .01);
         inventory.cans -= .01 * actualSeconds;
         worker.mood = clamp(worker.mood + rate * actualSeconds, 0, 100);
@@ -713,26 +739,44 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       } else worker.status = "waiting";
       continue;
     }
-    if (worker.mood <= 0) { worker.mood = 0; worker.status = "exhausted"; continue; }
-    if (workZones.includes(zoneType)) {
+    if (worker.mood <= 0) { worker.mood = 0; worker.status = "exhausted"; worker.lazyElapsed = 0; delete worker.lazyCheckInterval; continue; }
+    if (workZones.includes(zoneType) && !isForeman(worker)) {
       worker.continuousWork += dt;
       if (worker.personality === "slowBurn") worker.slowStacks = Math.floor(worker.continuousWork / 10);
       if (worker.personality === "lazy" && worker.status !== "slacking") {
+        if (worker.lazyCheckInterval === undefined) {
+          // Fresh work and pre-jitter saves receive a full independent interval.
+          // Do not reuse old elapsed time, which could trigger a batch on load.
+          worker.lazyElapsed = 0;
+          worker.lazyCheckInterval = 18 + random() * 4;
+        }
         worker.lazyElapsed += dt;
-        if (worker.lazyElapsed >= 20) { worker.lazyElapsed %= 20; if (random() < .5) worker.status = "slacking"; }
+        if (worker.lazyElapsed >= worker.lazyCheckInterval) {
+          worker.lazyElapsed -= worker.lazyCheckInterval;
+          // Draw the probability separately from the next interval: neither
+          // shorter nor longer intervals should be more likely to cause slacking.
+          if (random() < .3) {
+            worker.status = "slacking";
+            worker.lazyElapsed = 0;
+            delete worker.lazyCheckInterval;
+          } else worker.lazyCheckInterval = 18 + random() * 4;
+        }
+      } else if (worker.status === "slacking") {
+        worker.lazyElapsed = 0;
+        delete worker.lazyCheckInterval;
       }
     }
   }
 
   const gatherWorkers = workers.filter((worker) => worker.zoneId && zoneTypes.get(worker.zoneId) === "gather" && worker.mood > 0 && worker.status !== "dragging" && plotById.get(worker.zoneId)?.enabled !== false);
   const gatherLeaders = new Map<string, number>();
-  for (const worker of gatherWorkers) if (worker.personality === "leader") gatherLeaders.set(worker.zoneId!, (gatherLeaders.get(worker.zoneId!) ?? 0) + 1);
+  for (const worker of gatherWorkers) if (!isForeman(worker) && worker.personality === "leader") gatherLeaders.set(worker.zoneId!, (gatherLeaders.get(worker.zoneId!) ?? 0) + 1);
   for (const worker of gatherWorkers) {
     const plot = plotById.get(worker.zoneId!)!;
     const holy = holyPlot(plot);
-    if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100);
+    if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100);
     if (worker.status !== "slacking") {
-      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * (holy ? 2 : 1);
+      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * productionMultiplier(plot, holy);
       inventory.raw += 10 * rate * dt;
       worker.status = worker.mood <= 0 ? "exhausted" : "gathering";
     } else if (worker.mood <= 0) worker.status = "exhausted";
@@ -754,11 +798,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const recipe = RECIPES[plotState.recipe];
     if (!plotState.batch.active && active.length && inventory.raw >= recipe.raw) { inventory.raw -= recipe.raw; plotState.batch = { active: true, progress: 0, reservedRaw: recipe.raw }; }
     if (plotState.batch.active && active.length) {
-      const leaders = group.filter((worker) => worker.personality === "leader").length;
+      const leaders = group.filter((worker) => !isForeman(worker) && worker.personality === "leader").length;
       const holy = holyPlot(plot);
       let contribution = 0;
-      for (const worker of active) { if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * (holy ? 2 : 1); worker.status = worker.mood <= 0 ? "exhausted" : "processing"; }
-      for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
+      for (const worker of active) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * productionMultiplier(plot, holy); worker.status = worker.mood <= 0 ? "exhausted" : "processing"; }
+      for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += 1; plotState.produced += 1;
@@ -782,11 +826,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       plotState.batch = { active: true, progress: 0, reserved };
     }
     if (plotState.batch.active && active.length) {
-      const leaders = group.filter((worker) => worker.personality === "leader").length;
+      const leaders = group.filter((worker) => !isForeman(worker) && worker.personality === "leader").length;
       const holy = holyPlot(plot);
       let contribution = 0;
-      for (const worker of active) { if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * (1 + state.research.synthesis * .15) * (holy ? 2 : 1); worker.status = worker.mood <= 0 ? "exhausted" : "synthesizing"; }
-      for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
+      for (const worker of active) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * (1 + state.research.synthesis * .15) * productionMultiplier(plot, holy); worker.status = worker.mood <= 0 ? "exhausted" : "synthesizing"; }
+      for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += recipe.output; plotState.produced += recipe.output;
@@ -826,7 +870,7 @@ export function parseSavedState(value: string | null): GameState | null {
       batch?: ProcessPlotState["batch"];
     };
     if (
-      ![1, 2, 3, 4, 5, 6, 7, 8].includes(parsed.version ?? 0) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(parsed.version ?? 0) ||
       !Number.isFinite(parsed.coins) ||
       !Array.isArray(parsed.workers) ||
       !parsed.inventory ||
@@ -834,6 +878,19 @@ export function parseSavedState(value: string | null): GameState | null {
       ((parsed.version ?? 0) >= 3 && !parsed.processPlots) ||
       ((parsed.version ?? 0) < 3 && !parsed.batch)
     ) return null;
+    if (parsed.workers.some((worker) => worker.role !== undefined && worker.role !== "foreman")) return null;
+    const foremanCount = parsed.workers.filter(isForeman).length;
+    if (foremanCount > 1) return null;
+    // Older previews already carried this reward. Preserve it while preventing
+    // another first-rebirth grant; current saves must carry a consistent record.
+    if (parsed.version === 9 && (
+      (parsed.rebirthCount !== 0 && parsed.rebirthCount !== 1)
+      || parsed.rebirthCount !== foremanCount
+    )) return null;
+    const rebirthCount: 0 | 1 = foremanCount === 1 ? 1 : 0;
+    if (parsed.workers.some((worker) => worker.lazyCheckInterval !== undefined && (
+      !Number.isFinite(worker.lazyCheckInterval) || worker.lazyCheckInterval < 18 || worker.lazyCheckInterval > 22
+    ))) return null;
     const rawPlots = Array.isArray(parsed.plots) && parsed.plots.length
       ? parsed.plots
       : INITIAL_PLOTS.map((plot) => ({ ...plot }));
@@ -907,7 +964,8 @@ export function parseSavedState(value: string | null): GameState | null {
       };
     });
     return {
-      version: 8,
+      version: 9,
+      rebirthCount,
       coins: parsed.coins!,
       plots,
       processPlots,
@@ -945,8 +1003,13 @@ export function parseSavedState(value: string | null): GameState | null {
         delete restored.moving;
         delete restored.motion;
         delete restored.recoveryRemaining;
-        const mood = wasInjured ? 100 : worker.mood;
-        const status: WorkerStatus = wasInjured || worker.status === "dragging"
+        if (wasInjured || worker.status === "dragging" || isForeman(worker)) {
+          restored.lazyElapsed = 0;
+          delete restored.lazyCheckInterval;
+        }
+        if (isForeman(worker)) restored.continuousWork = restored.slowStacks = 0;
+        const mood = wasInjured || isForeman(worker) ? 100 : worker.mood;
+        const status: WorkerStatus = wasInjured || worker.status === "dragging" || (isForeman(worker) && (worker.status === "slacking" || worker.status === "exhausted"))
           ? worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
             ? (mood >= 100 ? "ready" : "resting")
             : mood <= 0 ? "exhausted" : "idle"

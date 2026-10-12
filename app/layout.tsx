@@ -11,6 +11,9 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="zh-CN">
+      <head>
+        <link rel="preload" as="image" href="/worker-highlight-3x.png" />
+      </head>
       <body>{children}</body>
     </html>
   );

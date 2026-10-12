@@ -62,6 +62,8 @@ function checkInputBounds(value: unknown, depth = 0) {
 }
 
 function checkState(state: GameState) {
+  number(state.rebirthCount, "转生次数", 0, 1, true);
+  if (state.workers.filter((worker) => worker.role === "foreman").length !== state.rebirthCount) invalid("转生奖励记录");
   number(state.coins, "金币");
   const inventory = object(state.inventory, "库存");
   for (const key of ["raw", "cans", "rough", "refined", "screws", "rebar"]) number(inventory[key], `库存.${key}`);
@@ -89,10 +91,12 @@ function checkState(state: GameState) {
     if (workerIds.has(workerId)) invalid("重复人物编号");
     workerIds.add(workerId);
     text(worker.name, "人物名称");
+    if (worker.role !== undefined) choice(worker.role, ["foreman"], "人物身份");
     number(worker.mood, "人物心情", 0, 100);
     for (const key of ["stamina", "efficiency", "spirit"]) number(worker[key], `人物属性.${key}`, 1, 10, true);
     for (const key of ["u", "v", "x", "y"]) number(worker[key], `人物位置.${key}`, -Number.MAX_SAFE_INTEGER);
     for (const key of ["duration", "continuousWork", "lazyElapsed", "slowStacks"]) number(worker[key], `人物状态.${key}`);
+    if (worker.lazyCheckInterval !== undefined) number(worker.lazyCheckInterval, "人物摸鱼检查间隔", 18, 22);
     choice(worker.personality, ["leader", "slowBurn", "lazy"], "人物性格");
     choice(worker.status, WORKER_STATUSES, "人物状态");
     choice(worker.facing, ["left", "right"], "人物朝向");
@@ -207,9 +211,10 @@ function checkProvidedValues(raw: ObjectValue) {
 
 function normalizeState(source: unknown): GameState {
   const raw = object(source, "游戏数据");
-  if (typeof raw.version === "number" && raw.version > 8) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
-  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 8) invalid("存档版本");
+  if (typeof raw.version === "number" && raw.version > 9) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
+  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 9) invalid("存档版本");
   checkInputBounds(raw);
+  if (raw.version === 9 || raw.rebirthCount !== undefined) number(raw.rebirthCount, "转生次数", 0, 1, true);
   if (raw.schedulerBots !== undefined) number(raw.schedulerBots, "机器人数量", 1, MAX_COLLECTION_SIZE, true);
   const state = parseSavedState(JSON.stringify(raw));
   if (!state) invalid("游戏数据");

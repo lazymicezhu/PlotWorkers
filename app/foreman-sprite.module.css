@@ -1,0 +1,62 @@
+.sprite {
+  display: block;
+  overflow: visible;
+}
+
+.frames {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: 100%;
+  aspect-ratio: 1;
+  /* The planted feet are centered at 51.2% of each cell. Align that anchor
+     with the outer facing pivot so turning cannot shift the character. */
+  transform: translateX(-51.2%);
+  /* Four square poses per row. Percentage sizing also handles the source
+     sheet's 313.5px cells without rounding individual frame crops. */
+  background-image: url("/foreman-command-smooth.png");
+  background-repeat: no-repeat;
+  background-size: 400% 400%;
+  background-position: 0% 0%;
+  pointer-events: none;
+}
+
+.commanding .frames {
+  /* One bitmap and discrete frame changes; walking/facing updates do not
+     replace this element or restart its animation. Removing this class
+     immediately restores the resting pose. */
+  animation: directCrew 3s steps(1, end) 1 both;
+}
+
+.commanding.looping .frames {
+  animation-iteration-count: infinite;
+}
+
+@keyframes directCrew {
+  /* Rest 900ms; pose 4 and each pointing pose (7, 11) hold 300ms.
+     Pose 12 holds 210ms; all intermediate poses advance every 90ms. */
+  0% { background-position: 0% 0%; }
+  30% { background-position: 33.333333% 0%; }
+  33% { background-position: 66.666667% 0%; }
+  36% { background-position: 100% 0%; }
+  39% { background-position: 0% 33.333333%; }
+  49% { background-position: 33.333333% 33.333333%; }
+  52% { background-position: 66.666667% 33.333333%; }
+  55% { background-position: 100% 33.333333%; }
+  65% { background-position: 0% 66.666667%; }
+  68% { background-position: 33.333333% 66.666667%; }
+  71% { background-position: 66.666667% 66.666667%; }
+  74% { background-position: 100% 66.666667%; }
+  84% { background-position: 0% 100%; }
+  91% { background-position: 33.333333% 100%; }
+  94% { background-position: 66.666667% 100%; }
+  97% { background-position: 100% 100%; }
+  100% { background-position: 0% 0%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .commanding .frames {
+    animation: none;
+    background-position: 0% 0%;
+  }
+}

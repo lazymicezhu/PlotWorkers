@@ -91,7 +91,7 @@ test("bare legacy version 1 migrates original recipe, batch and retired injury",
   delete legacy.plotPurchases;
   const { state, exportedAt } = parseGameSave(JSON.stringify(legacy));
   assert.equal(exportedAt, null);
-  assert.equal(state.version, 8);
+  assert.equal(state.version, 9);
   assert.equal(state.processPlots.process.recipe, "refined");
   assert.deepEqual(state.processPlots.process.batch, legacy.batch);
   assert.equal(state.workers[0].status, "ready");
@@ -100,11 +100,11 @@ test("bare legacy version 1 migrates original recipe, batch and retired injury",
 });
 
 test("all supported bare save versions can be loaded", () => {
-  for (let version = 1; version <= 8; version++) {
+  for (let version = 1; version <= 9; version++) {
     const game = initial();
     game.version = version;
     if (version < 3) game.batch = { active: false, progress: 0, reservedRaw: 0 };
-    assert.equal(parse(game).version, 8);
+    assert.equal(parse(game).version, 9);
   }
 });
 
@@ -118,7 +118,7 @@ test("malformed JSON, unrelated packages and future formats are rejected with pl
   for (const value of ["", "not json", "{broken", "null", "[]"]) assert.throws(() => parseGameSave(value), /存档|JSON/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "another-game" })), /不是 Plot Workers/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "plot-workers-save", formatVersion: 2 })), /版本/);
-  assert.throws(() => parse({ ...initial(), version: 9 }), /较新版本/);
+  assert.throws(() => parse({ ...initial(), version: 10 }), /较新版本/);
 });
 
 test("oversize files and robot allocation attacks are rejected before migration", () => {

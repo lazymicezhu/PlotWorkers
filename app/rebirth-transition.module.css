@@ -1,0 +1,177 @@
+.dialog {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100svh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #9b8d6c;
+  box-shadow: none;
+  cursor: default;
+  touch-action: none;
+}
+
+.dialog::backdrop { background: transparent; }
+
+.message {
+  position: absolute;
+  right: 20px;
+  bottom: max(52px, env(safe-area-inset-bottom));
+  left: 20px;
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: .14em;
+  text-align: center;
+  animation: messageAppear 3.2s ease both;
+}
+
+/* One CSS completion event covers 2600ms + the last plot's 480ms delay. */
+.completionSignal {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+  animation: completeTransition 3.2s linear both;
+}
+
+.transitioning > :global(.hud),
+.transitioning > aside,
+.transitioning > :global(.performance-overlay),
+.transitioning > :global(.confirm-panel) {
+  pointer-events: none;
+  animation: fadeAway .42s ease both;
+}
+
+.worldDissolving { pointer-events: none; }
+
+.worldDissolving :global(.plot-hit) { pointer-events: none; }
+
+/* Keep the plot container at ground level so its remaining outline stays still. */
+.worldDissolving :global(.plot-base),
+.worldDissolving :global(.plot-surface) {
+  -webkit-mask-image: linear-gradient(to bottom, #000 0 36%, transparent 69% 100%);
+  mask-image: linear-gradient(to bottom, #000 0 36%, transparent 69% 100%);
+  -webkit-mask-size: 100% 300%;
+  mask-size: 100% 300%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: sinkIntoGround 2.6s cubic-bezier(.36, 0, .55, 1) var(--rebirth-delay, 0ms) both;
+}
+
+.worldDissolving :global(.plot-shadow) {
+  animation: groundShadow 2.6s ease var(--rebirth-delay, 0ms) both;
+}
+
+.worldDissolving :global(.zone-sign),
+.worldDissolving :global(.scene-action),
+.worldDissolving :global(.plot-volume-highlight),
+.worldDissolving :global(.plot-bonus-effect),
+.worldDissolving :global(.ground-event),
+.worldDissolving :global(.auto-gripper) {
+  animation: fadeAway .55s ease both;
+}
+
+/* Opacity never changes the worker's position, facing, or body proportions. */
+.worldDissolving :global(.walker) {
+  pointer-events: none;
+  animation: fadeAway .8s ease var(--rebirth-delay, 0ms) both;
+}
+
+.worldDissolving :global(.plot)::before,
+.worldDissolving :global(.plot)::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  left: 0;
+  width: var(--plot-width);
+  height: var(--plot-height);
+  pointer-events: none;
+}
+
+.worldDissolving :global(.plot)::before {
+  top: var(--depth);
+  background: linear-gradient(130deg, #dbcda33d, #d6b96699 45%, #eee1b83d);
+  clip-path: polygon(evenodd, 50% 0, 100% 50%, 50% 100%, 0 50%, 50% 0, 50% 1%, 1% 50%, 50% 99%, 99% 50%, 50% 1%);
+  animation: groundOutline 2.6s ease var(--rebirth-delay, 0ms) both;
+}
+
+.worldDissolving :global(.plot)::after {
+  top: calc(var(--depth) - 10px);
+  background:
+    radial-gradient(circle at 22% 43%, #d9c078 0 1.5px, transparent 3.5px),
+    radial-gradient(circle at 40% 63%, #d9c078 0 2px, transparent 4.5px),
+    radial-gradient(circle at 56% 78%, #e2cd90 0 1.5px, transparent 4px),
+    radial-gradient(circle at 77% 48%, #d9c078 0 1.5px, transparent 3.5px),
+    radial-gradient(circle at 66% 35%, #e2cd90 0 1px, transparent 3px),
+    radial-gradient(ellipse at 50% 58%, #eadcb330 0, #eee2c515 30%, transparent 58%);
+  animation: groundDust 2.6s ease var(--rebirth-delay, 0ms) both;
+}
+
+@keyframes sinkIntoGround {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+    -webkit-mask-position: 0 0;
+    mask-position: 0 0;
+  }
+  18% { opacity: 1; }
+  55% { opacity: .76; }
+  100% {
+    opacity: 0;
+    transform: translateY(64px);
+    -webkit-mask-position: 0 100%;
+    mask-position: 0 100%;
+  }
+}
+
+@keyframes groundShadow {
+  0% { opacity: 1; }
+  35% { opacity: .65; }
+  100% { opacity: 0; }
+}
+
+@keyframes groundOutline {
+  0% { opacity: 0; }
+  25% { opacity: .75; }
+  65% { opacity: .42; }
+  100% { opacity: 0; }
+}
+
+@keyframes groundDust {
+  0%, 12% { opacity: 0; transform: translateY(0); }
+  42% { opacity: .75; }
+  100% { opacity: 0; transform: translateY(-22px); }
+}
+
+@keyframes fadeAway { from { opacity: 1; } to { opacity: 0; } }
+@keyframes completeTransition { from { opacity: 0; } to { opacity: 0; } }
+@keyframes messageAppear {
+  0% { opacity: 0; }
+  22%, 72% { opacity: .86; }
+  100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .worldDissolving :global(.plot-base),
+  .worldDissolving :global(.plot-surface) {
+    -webkit-mask-image: none;
+    mask-image: none;
+    animation: fadeAway .5s ease both;
+  }
+
+  .worldDissolving :global(.plot-shadow),
+  .worldDissolving :global(.walker) {
+    animation: fadeAway .3s ease both;
+  }
+
+  .worldDissolving :global(.plot)::before,
+  .worldDissolving :global(.plot)::after { display: none; }
+
+  .completionSignal, .message { animation-duration: .65s; }
+}

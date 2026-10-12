@@ -6,10 +6,11 @@ import {
   CSSProperties,
   KeyboardEvent,
   PointerEvent,
-  WheelEvent,
   memo,
   startTransition,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -46,6 +47,8 @@ import {
   circleHitsPlot,
   chooseAutoDispatch,
   createInitialState,
+  guardedPlotIds,
+  isForeman,
   nextPlotPrice,
   orderCoinReward,
   parseSavedState,
@@ -64,10 +67,27 @@ import {
 import { reconcileSimulation, simulateElapsed } from "./simulation-protocol";
 import type { SimulationStepRequest, SimulationStepResponse } from "./simulation-protocol";
 import SimulationWorker from "./simulation.worker?worker";
+import { CanvasWorkers, getCanvasWorkerPosition, hitTestCanvasWorker, setCanvasWorkerHandoff, clearCanvasWorkerHandoffs } from "./worker-canvas";
+import { startWorkerTransfer } from "./worker-transfer";
+import { resolveWorkerDrop, workerAtPoint } from "./worker-drag";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
 import { BatchProgressBackground } from "./batch-progress";
 import { SAVE_BACKUP_KEY, SettingsDialog } from "./settings-dialog";
 import { exportGameSave } from "./save-file";
+import { startGameAutosave } from "./game-autosave";
+import { PerformanceOverlay } from "./performance-monitor";
+import { isPerformanceMonitoringEnabled, measureGameTask, recordGameTask } from "./performance-metrics";
+import { createRobotScheduler } from "./robot-scheduler";
+import { ForemanAura } from "./foreman-aura";
+import { useTrackingCamera } from "./use-tracking-camera";
+import { CAMERA_CULL_MARGIN_WORLD } from "./camera-motion";
+import { layeredBackingPlots } from "./plot-rendering";
+import { facingForDestination, readRenderedWorkerPosition } from "./worker-motion";
+import { ForemanSprite } from "./foreman-sprite";
+import { canFirstRebirth } from "./rebirth";
+import { saveFirstRebirth } from "./rebirth-save";
+import { RebirthReveal } from "./rebirth-reveal";
+import { RebirthTransition, rebirthTransitionStyles } from "./rebirth-transition";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -77,6 +97,15 @@ const WORLD_H = 1080;
 const PLOT_DRAG_Z = SCENE_DRAG_Z + 100_000;
 const SAVE_KEY = "green-realm-save-v1";
 const ZOOM_KEY = "green-realm-player-zoom";
+const PERFORMANCE_KEY = "green-realm-performance-display";
+
+function persistGame(state: GameState) {
+  measureGameTask("save", () => localStorage.setItem(SAVE_KEY, JSON.stringify(state)));
+}
+// About 7% zoom per 100 CSS pixels, independent of wheel event frequency.
+const WHEEL_ZOOM_SENSITIVITY = .0007;
+// Chrome encodes pinch scale as deltaY = -100 * log(scale); retain 70% of that response.
+const PINCH_ZOOM_SENSITIVITY = .007;
 const CAN_PURCHASE_AMOUNTS = [1, 10, 50, 200] as const;
 const ZONE_META: Record<ZoneType, { name: string; subtitle: string }> = {
   gather: { name: "采集区", subtitle: "产出原料" },
@@ -95,6 +124,8 @@ type AutoTransfer = {
   from: { x: number; y: number };
   to: { x: number; y: number };
   active: boolean;
+  landing?: boolean;
+  token: number;
   durationMs: number;
   action: "rest" | "work" | "wake";
 };
@@ -119,44 +150,77 @@ type WalkerSpriteProps = {
   tracked: boolean;
   hovered: boolean;
   raised: boolean;
+  foremanCommanding: boolean;
+  rebirthDelay?: number;
+  worldRef: React.RefObject<HTMLDivElement | null>;
+  onCommandEnd: (id: string) => void;
   onDown: (event: PointerEvent<HTMLDivElement>, id: string) => void;
   onEnter: (event: PointerEvent<HTMLDivElement>, id: string) => void;
   onLeave: () => void;
 };
 
-const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfer, dragging, tracked, hovered, raised, onDown, onEnter, onLeave }: WalkerSpriteProps) {
+const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfer, dragging, tracked, hovered, raised, foremanCommanding, rebirthDelay = 0, worldRef, onCommandEnd, onDown, onEnter, onLeave }: WalkerSpriteProps) {
+  const elementRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    const world = worldRef.current ?? element?.parentElement ?? null;
+    return () => {
+      const point = readRenderedWorkerPosition(element);
+      if (point) setCanvasWorkerHandoff(world, worker.id, point);
+    };
+  }, [worldRef, worker.id]);
   const automated = Boolean(autoTransfer);
-  const hasStatusBadge = worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking";
+  const foreman = isForeman(worker);
+  const hasStatusBadge = !foreman && (worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking");
   return <div
-    className={`walker ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${autoTransfer?.action === "wake" ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
+    ref={elementRef}
+    className={`walker ${foreman ? "is-foreman" : ""} ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${automated && !autoTransfer?.active ? "is-auto-pickup" : ""} ${autoTransfer?.landing ? "is-auto-landing" : ""} ${autoTransfer?.action === "wake" && autoTransfer.active && !autoTransfer.landing ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
     data-worker-id={worker.id}
     onPointerDown={(event) => onDown(event, worker.id)}
     onPointerEnter={(event) => onEnter(event, worker.id)}
     onPointerLeave={onLeave}
-    style={{ "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: raised ? PLOT_DRAG_Z + 1 + Math.round(projected.y) : dragging || automated ? SCENE_DRAG_Z : sceneDepth(projected.y, hasStatusBadge ? 20_000 : 0), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
+    style={{ "--rebirth-delay": `${rebirthDelay}ms`, "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: raised ? PLOT_DRAG_Z + 1 + Math.round(projected.y) : dragging || automated ? SCENE_DRAG_Z : sceneDepth(projected.y, hasStatusBadge ? 20_000 : 0), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
     role="button"
     aria-label={`${worker.name}，${STATUS_NAMES[worker.status]}`}
   >
-    {autoTransfer?.action === "wake" && <span className="wake-gripper" aria-hidden="true">🦾</span>}
+    {autoTransfer?.action === "wake" && autoTransfer.active && !autoTransfer.landing && <span className="wake-gripper" aria-hidden="true">🦾</span>}
     {hasStatusBadge && <span className={`worker-badge badge-${worker.status}`}>{worker.status === "exhausted" ? "需要休息" : worker.status === "ready" ? "可以工作" : "摸鱼中"}</span>}
     <span className="walker-shadow" />
-    <img className="worker-image" src="/worker.png" alt="" draggable={false} />
+    {foreman ? <ForemanSprite commanding={foremanCommanding && !dragging && !raised && !hovered && ["gathering", "processing", "synthesizing", "waiting"].includes(worker.status)} onCommandEnd={() => onCommandEnd(worker.id)} /> : <img className={tracked || automated ? "worker-image worker-image-highlight" : "worker-image"} src={tracked || automated ? "/worker-highlight-3x.png" : "/worker.png"} alt="" draggable={false} />}
   </div>;
 }, (previous, next) =>
   previous.worker.id === next.worker.id &&
   previous.worker.name === next.worker.name &&
+  previous.worker.role === next.worker.role &&
   previous.worker.status === next.worker.status &&
   previous.worker.duration === next.worker.duration &&
   previous.worker.facing === next.worker.facing &&
   previous.projected.x === next.projected.x &&
   previous.projected.y === next.projected.y &&
   previous.autoTransfer?.action === next.autoTransfer?.action &&
+  previous.autoTransfer?.active === next.autoTransfer?.active &&
+  previous.autoTransfer?.landing === next.autoTransfer?.landing &&
   previous.autoTransfer?.durationMs === next.autoTransfer?.durationMs &&
   previous.dragging === next.dragging &&
   previous.tracked === next.tracked &&
   previous.hovered === next.hovered &&
-  previous.raised === next.raised,
+  previous.raised === next.raised &&
+  previous.foremanCommanding === next.foremanCommanding &&
+  previous.rebirthDelay === next.rebirthDelay &&
+  previous.onCommandEnd === next.onCommandEnd,
 );
+
+type ForemanCycle = {
+  phase: "moving" | "commanding";
+  zoneId: string;
+  x: number;
+  y: number;
+  startedAt: number;
+};
+
+function nextForemanCommandAt(now: number) {
+  return now + 20_000 + Math.random() * 10_000;
+}
 
 function project(plot: PlotState, u: number, v: number) {
   return {
@@ -226,15 +290,11 @@ function statusAfterDrop(worker: WorkerState, plot: PlotState | null) {
   return worker.mood <= 0 ? "exhausted" as const : "idle" as const;
 }
 
-function restoreWorker(worker: WorkerState, plots: PlotState[]): WorkerState {
-  const plot = plots.find((item) => item.id === worker.zoneId) ?? null;
-  return { ...worker, status: worker.status === "dragging" ? statusAfterDrop(worker, plot) : worker.status };
-}
-
 const initialLiving = INITIAL_PLOTS.find((plot) => plot.id === "living")!;
 const initialPoint = project(initialLiving, 2, 2);
 
-export default function Home() {
+export default function PlotWorkersGame() {
+  const viewportRef = useRef<HTMLElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const dragOrigin = useRef<WorkerState | null>(null);
   const draggingIdRef = useRef<string | null>(null);
@@ -242,15 +302,24 @@ export default function Home() {
   const dragElementRef = useRef<HTMLDivElement | null>(null);
   const dragPositionRef = useRef<{ x: number; y: number } | null>(null);
   const dragStart = useRef({ x: 0, y: 0 });
+  const dragPointerRef = useRef<number | null>(null);
+  const suppressWorkerClickRef = useRef(false);
+  const dragGrabOffsetRef = useRef({ x: 0, y: 0 });
+  const dragMovedRef = useRef(false);
+  const transferTokenRef = useRef(0);
   const panOrigin = useRef({ clientX: 0, clientY: 0, x: 0, y: 0 });
+  const panPointerRef = useRef<number | null>(null);
   const plotGrabOffset = useRef({ x: 0, y: 0 });
   const plotDraftRef = useRef<PlotDraft | null>(null);
   const placingPlotRef = useRef<{ plot: PlotState; valid: boolean } | null>(null);
   const recycleBinRef = useRef<HTMLDivElement | null>(null);
   const autoTransfersRef = useRef<AutoTransfer[]>([]);
-  const autoCooldownRef = useRef<number[]>([]);
-  const autoFinishTimersRef = useRef<Map<string, number>>(new Map());
+  const robotSchedulerRef = useRef<ReturnType<typeof createRobotScheduler> | null>(null);
+  const autoTransferControllersRef = useRef<Map<string, ReturnType<typeof startWorkerTransfer>>>(new Map());
   const movementCursorRef = useRef(0);
+  const foremanCyclesRef = useRef(new Map<string, ForemanCycle>());
+  const foremanCommandAtRef = useRef(new Map<string, number>());
+  const [commandingForemen, setCommandingForemen] = useState<ReadonlySet<string>>(new Set());
   const simulationWorkerRef = useRef<Worker | null>(null);
   const pendingSimulationRef = useRef<PendingSimulation | null>(null);
   const simulationRequestIdRef = useRef(0);
@@ -260,7 +329,6 @@ export default function Home() {
   const [game, setGame] = useState<GameState>(() => createInitialState(initialPoint.x, initialPoint.y));
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
-  const [camera, setCamera] = useState({ x: 0, y: 0 });
   const [viewportSize, setViewportSize] = useState({ width: 1440, height: 900 });
   const [hoveredPlot, setHoveredPlot] = useState<ZoneId | null>(null);
   const [hoveredWorker, setHoveredWorker] = useState<string | null>(null);
@@ -275,8 +343,13 @@ export default function Home() {
   const [selectedSynthesisPlotId, setSelectedSynthesisPlotId] = useState<ZoneId>("");
   const [placingHoly, setPlacingHoly] = useState(false);
   const [holyPreview, setHolyPreview] = useState<{ x: number; y: number } | null>(null);
-  const [resetArmed, setResetArmed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rebirthStage, setRebirthStage] = useState<"ready" | "dissolving" | "reward" | "reborn">("ready");
+  const rebirthPausedRef = useRef(false);
+  const rebirthSourceRef = useRef<GameState | null>(null);
+  const [rebirthError, setRebirthError] = useState("");
+  const rebirthSceneHidden = rebirthStage === "dissolving" || rebirthStage === "reward";
+  const [performanceEnabled, setPerformanceEnabled] = useState(false);
   const [worldRevision, setWorldRevision] = useState(0);
   const [notice, setNotice] = useState("");
   const [builderType, setBuilderType] = useState<ZoneType>("gather");
@@ -286,9 +359,78 @@ export default function Home() {
   const [overRecycle, setOverRecycle] = useState(false);
   const [autoTransfers, setAutoTransfers] = useState<AutoTransfer[]>([]);
   const [canPurchaseIndex, setCanPurchaseIndex] = useState(1);
+  const { camera, setCamera, beginPan, panCamera, endPan } = useTrackingCamera({
+    worldRef,
+    trackedId,
+    paused: rebirthSceneHidden || Boolean(draggingId || panning || plotDraft || placingPlot || placingHoly),
+    zoom,
+    worldRevision,
+    initialPosition: { x: 0, y: 0 },
+    viewportSize,
+  });
+
+  const finishForemanCycle = useCallback((id: string) => {
+    if (!foremanCyclesRef.current.delete(id)) return;
+    setCommandingForemen((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    let hiddenAt: number | null = document.hidden ? performance.now() : null;
+    const resetHiddenCycles = () => {
+      if (!document.hidden) {
+        if (hiddenAt !== null) {
+          const hiddenDuration = performance.now() - hiddenAt;
+          for (const [id, deadline] of foremanCommandAtRef.current) {
+            foremanCommandAtRef.current.set(id, deadline + hiddenDuration);
+          }
+          hiddenAt = null;
+        }
+        return;
+      }
+      hiddenAt = performance.now();
+      foremanCyclesRef.current.clear();
+      setCommandingForemen((current) => current.size ? new Set() : current);
+    };
+    document.addEventListener("visibilitychange", resetHiddenCycles);
+    return () => document.removeEventListener("visibilitychange", resetHiddenCycles);
+  }, []);
+
+  const finishPan = useCallback((event?: PointerEvent<HTMLElement>) => {
+    const pointerId = panPointerRef.current;
+    if (pointerId === null || (event && event.pointerId !== pointerId)) return;
+    const finalPosition = event?.type === "pointerup" ? {
+      x: panOrigin.current.x + event.clientX - panOrigin.current.clientX,
+      y: panOrigin.current.y + event.clientY - panOrigin.current.clientY,
+    } : undefined;
+    panPointerRef.current = null;
+    endPan(finalPosition);
+    setPanning(false);
+    const viewport = viewportRef.current;
+    if (viewport?.hasPointerCapture(pointerId)) viewport.releasePointerCapture(pointerId);
+  }, [endPan]);
+
+  useEffect(() => {
+    const finish = () => finishPan();
+    const visibilityChanged = () => { if (document.hidden) finishPan(); };
+    window.addEventListener("blur", finish);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => {
+      panPointerRef.current = null;
+      window.removeEventListener("blur", finish);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [finishPan]);
 
   const selectedWorker = useMemo(() => game.workers.find((worker) => worker.id === selectedId) ?? null, [game.workers, selectedId]);
+  const guardedPlots = useMemo(() => guardedPlotIds(game.workers), [game.workers]);
   const displayPlots = useMemo(() => game.plots.map((plot) => plotDraft?.plot.id === plot.id ? plotDraft.plot : plot), [game.plots, plotDraft]);
+  const layeredPlotIds = useMemo(() => layeredBackingPlots(displayPlots), [displayPlots]);
+  const rebirthDelayByPlot = useMemo(() => new Map(displayPlots.map((plot, index) => [plot.id, Math.min(index, 3) * 160])), [displayPlots]);
   const displayPlotById = useMemo(() => new Map(displayPlots.map((plot) => [plot.id, plot])), [displayPlots]);
   const workerCountByPlot = useMemo(() => {
     const counts = new Map<string, number>();
@@ -315,7 +457,7 @@ export default function Home() {
     else if (!hasWorker) synthesisStatus = "等待工人";
   }
   const visibleBounds = useMemo(() => {
-    const margin = 240;
+    const margin = CAMERA_CULL_MARGIN_WORLD;
     const centerX = WORLD_W / 2 - camera.x / zoom;
     const centerY = WORLD_H / 2 - camera.y / zoom;
     return {
@@ -326,7 +468,7 @@ export default function Home() {
     };
   }, [camera, viewportSize, zoom]);
 
-  useEffect(() => { gameRef.current = game; }, [game]);
+  useLayoutEffect(() => { gameRef.current = game; }, [game]);
 
   useEffect(() => {
     if (typeof Worker === "undefined") return;
@@ -344,7 +486,9 @@ export default function Home() {
         setGame((current) => {
           if (pending.epoch !== simulationEpochRef.current) return current;
           pendingSimulationRef.current = null;
+          const measurementStart = isPerformanceMonitoringEnabled() ? performance.now() : null;
           const next = reconcileSimulation(pending.base, current, event.data.state, pending.seconds);
+          if (measurementStart !== null) recordGameTask("simulation", (event.data.simulationMs ?? 0) + performance.now() - measurementStart);
           unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
           return next;
         });
@@ -365,6 +509,7 @@ export default function Home() {
   useEffect(() => {
     const saved = parseSavedState(localStorage.getItem(SAVE_KEY));
     if (saved) {
+      gameRef.current = saved;
       // Restore browser-only state after hydration; synchronous restoration is intentional.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setGame(saved);
@@ -372,6 +517,7 @@ export default function Home() {
     }
     const savedZoom = Number(localStorage.getItem(ZOOM_KEY));
     if (Number.isFinite(savedZoom) && savedZoom >= .28 && savedZoom <= 1.5) setZoom(savedZoom);
+    setPerformanceEnabled(localStorage.getItem(PERFORMANCE_KEY) === "true");
     const updateViewportSize = () => setViewportSize({ width: window.innerWidth, height: window.innerHeight });
     updateViewportSize();
     window.addEventListener("resize", updateViewportSize);
@@ -383,10 +529,33 @@ export default function Home() {
   }, [zoom]);
 
   useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const onWheel = (event: WheelEvent) => {
+      const deltaMode = event.deltaMode;
+      const deltaY = event.deltaY;
+      const isPinch = event.ctrlKey;
+      if (rebirthPausedRef.current || event.defaultPrevented || deltaY === 0 || !(event.target instanceof Element)) return;
+      // Native bubbling reaches this listener before React's panel handlers.
+      if (event.target.closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog")) return;
+      // Keep pinching when scene objects move under the gesture's anchor.
+      if (!isPinch && event.target.closest(".plot, .walker")) return;
+      if (event.cancelable) event.preventDefault();
+      const deltaPixels = deltaY * (deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : deltaMode === WheelEvent.DOM_DELTA_PAGE ? viewport.clientHeight : 1);
+      const sensitivity = isPinch ? PINCH_ZOOM_SENSITIVITY : WHEEL_ZOOM_SENSITIVITY;
+      const factor = Math.exp(-deltaPixels * sensitivity);
+      setZoom((value) => Math.max(.28, Math.min(1.5, value * factor)));
+    };
+    // React's delegated onWheel is passive and cannot prevent browser scrolling.
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
     simulationLastTimeRef.current = performance.now();
     const timer = window.setInterval(() => {
       const now = performance.now();
-      if (document.visibilityState === "visible") {
+      if (!rebirthPausedRef.current && document.visibilityState === "visible") {
         const elapsed = Math.min(5, (now - simulationLastTimeRef.current) / 1000);
         unsimulatedSecondsRef.current = Math.min(5, unsimulatedSecondsRef.current + elapsed);
         const worker = simulationWorkerRef.current;
@@ -397,6 +566,7 @@ export default function Home() {
             id,
             state: gameRef.current,
             seconds: unsimulatedSecondsRef.current,
+            measurePerformance: isPerformanceMonitoringEnabled(),
           };
           pendingSimulationRef.current = { id, epoch: simulationEpochRef.current, base: gameRef.current, seconds: request.seconds };
           worker.postMessage(request);
@@ -407,7 +577,7 @@ export default function Home() {
             setGame((current) => {
               if (epoch !== simulationEpochRef.current) return current;
               unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - seconds);
-              return simulateElapsed(current, seconds);
+              return measureGameTask("simulation", () => simulateElapsed(current, seconds));
             });
           });
         }
@@ -419,64 +589,140 @@ export default function Home() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setGame((current) => {
-        const plotsById = new Map(current.plots.map((plot) => [plot.id, plot]));
-        const eligible = current.workers.filter((worker) =>
-          worker.id !== draggingIdRef.current &&
-          worker.id !== hoveredWorkerRef.current &&
-          Boolean(worker.zoneId) &&
-          worker.status !== "dragging" &&
-          worker.status !== "exhausted"
-        );
-        if (!eligible.length) return current;
-        const batchSize = current.workers.length > 300 ? 12 : current.workers.length > 150 ? 10 : 8;
-        const start = movementCursorRef.current % eligible.length;
-        const movingIds = new Set<string>();
-        for (let index = 0; index < Math.min(batchSize, eligible.length); index += 1) {
-          movingIds.add(eligible[(start + index) % eligible.length].id);
+      if (rebirthPausedRef.current || document.visibilityState !== "visible") return;
+      const current = gameRef.current;
+      const plotsById = new Map(current.plots.map((plot) => [plot.id, plot]));
+      const now = performance.now();
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      // Foremen finish one destination and one gesture before being eligible
+      // for another walk. This reuses the normal shared movement tick.
+      for (const [id, cycle] of foremanCyclesRef.current) {
+        const worker = current.workers.find((item) => item.id === id);
+        const plot = worker?.zoneId ? plotsById.get(worker.zoneId) : undefined;
+        if (!worker || !plot || worker.zoneId !== cycle.zoneId || plot.enabled === false ||
+          worker.status === "dragging" || id === draggingIdRef.current ||
+          id === hoveredWorkerRef.current || plotDraftRef.current?.plot.id === cycle.zoneId) {
+          finishForemanCycle(id);
+          continue;
         }
-        movementCursorRef.current = (start + batchSize) % eligible.length;
-        return {
-          ...current,
-          workers: current.workers.map((worker) => {
-          if (!movingIds.has(worker.id) || !worker.zoneId) return worker;
-          const plot = plotsById.get(worker.zoneId);
-          if (!plot) return worker;
-          const u = .55 + Math.random() * (plot.cols - 1.1);
-          const v = .55 + Math.random() * (plot.rows - 1.1);
-          const next = project(plot, u, v);
-          const speed = Math.random();
-          const duration = speed < .2 ? 2400 : speed < .72 ? 5200 : 3600;
-          return { ...worker, u, v, ...next, duration, facing: next.x < worker.x ? "left" : "right" };
-          }),
-        };
-      });
+        const target = project(plot, worker.u, worker.v);
+        const element = worldRef.current?.querySelector(`[data-worker-id="${CSS.escape(id)}"]`);
+        if (!element || Math.hypot(target.x - cycle.x, target.y - cycle.y) > .5) {
+          finishForemanCycle(id);
+          continue;
+        }
+        const canCommand = !reduceMotion && ["gathering", "processing", "synthesizing", "waiting"].includes(worker.status);
+        if (cycle.phase === "commanding") {
+          const frame = element.querySelector("[data-foreman-pose] > span");
+          // animationend normally releases the worker. Cover removed/disabled
+          // animations without ending a gesture that is still running.
+          if (!canCommand || (now - cycle.startedAt > 3500 &&
+            !frame?.getAnimations().some((animation) => animation.playState === "running"))) {
+            finishForemanCycle(id);
+          }
+          continue;
+        }
+        const position = readRenderedWorkerPosition(element) ?? getCanvasWorkerPosition(worldRef.current, worker.id);
+        const stillMoving = element.getAnimations().some((animation) =>
+          "transitionProperty" in animation && animation.transitionProperty === "translate" && animation.playState === "running"
+        );
+        if (!position || stillMoving || Math.hypot(position.x - target.x, position.y - target.y) > .5) continue;
+        if (!canCommand || now < (foremanCommandAtRef.current.get(id) ?? 0)) {
+          finishForemanCycle(id);
+          continue;
+        }
+        foremanCommandAtRef.current.set(id, nextForemanCommandAt(now));
+        foremanCyclesRef.current.set(id, { ...cycle, phase: "commanding", startedAt: now });
+        setCommandingForemen((previous) => new Set(previous).add(id));
+      }
+      const eligible = current.workers.filter((worker) =>
+        worker.id !== draggingIdRef.current &&
+        worker.id !== hoveredWorkerRef.current &&
+        Boolean(worker.zoneId) &&
+        worker.status !== "dragging" &&
+        worker.status !== "exhausted" &&
+        !foremanCyclesRef.current.has(worker.id) &&
+        plotDraftRef.current?.plot.id !== worker.zoneId &&
+        plotsById.get(worker.zoneId!)?.enabled !== false
+      );
+      if (!eligible.length) return;
+      const batchSize = current.workers.length > 300 ? 12 : current.workers.length > 150 ? 10 : 8;
+      const start = movementCursorRef.current % eligible.length;
+      const moves = new Map<string, Pick<WorkerState, "zoneId" | "u" | "v" | "x" | "y" | "duration" | "facing">>();
+      // Read only the small moving batch, before writing state. Direction follows
+      // the actual interpolated position rather than the previous destination.
+      for (let index = 0; index < Math.min(batchSize, eligible.length); index += 1) {
+        const worker = eligible[(start + index) % eligible.length];
+        const plot = plotsById.get(worker.zoneId!);
+        if (!plot) continue;
+        const element = worldRef.current?.querySelector(`[data-worker-id="${CSS.escape(worker.id)}"]`) ?? null;
+        // Offscreen foremen resume the cycle when their sprite is visible.
+        if (isForeman(worker) && !element) continue;
+        const position = readRenderedWorkerPosition(element) ?? getCanvasWorkerPosition(worldRef.current, worker.id);
+        const u = .55 + Math.random() * (plot.cols - 1.1);
+        const v = .55 + Math.random() * (plot.rows - 1.1);
+        const next = project(plot, u, v);
+        const speed = Math.random();
+        const duration = speed < .2 ? 2400 : speed < .72 ? 5200 : 3600;
+        if (isForeman(worker)) {
+          if (!foremanCommandAtRef.current.has(worker.id)) {
+            foremanCommandAtRef.current.set(worker.id, nextForemanCommandAt(now));
+          }
+          foremanCyclesRef.current.set(worker.id, { phase: "moving", zoneId: worker.zoneId!, ...next, startedAt: now });
+        }
+        moves.set(worker.id, { zoneId: worker.zoneId, u, v, ...next, duration, facing: facingForDestination(position, next.x, worker.facing) });
+      }
+      movementCursorRef.current = (start + batchSize) % eligible.length;
+      setGame((state) => ({
+        ...state,
+        workers: state.workers.map((worker) => {
+          const move = moves.get(worker.id);
+          if (!move || worker.zoneId !== move.zoneId || worker.status === "dragging" || worker.id === draggingIdRef.current || worker.id === hoveredWorkerRef.current) return worker;
+          return { ...worker, ...move };
+        }),
+      }));
     }, 1200);
     return () => window.clearInterval(timer);
+  }, [finishForemanCycle]);
+
+  useEffect(() => {
+    return startGameAutosave((reason) => {
+      if (rebirthPausedRef.current) return;
+      if (reason === "interval" && (draggingIdRef.current || plotDraftRef.current)) return;
+      // Leaving saves committed positions; loading already recovers in-flight workers.
+      persistGame(gameRef.current);
+    });
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (!draggingIdRef.current && !plotDraftRef.current) localStorage.setItem(SAVE_KEY, JSON.stringify(gameRef.current));
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const autoFinishTimers = autoFinishTimersRef.current;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        for (let botIndex = 0; botIndex < gameRef.current.schedulerBots; botIndex += 1) startAutoDispatch(botIndex);
-      }
-    }, 400);
+    const autoTransferControllers = autoTransferControllersRef.current;
+    const scheduler = createRobotScheduler({
+      now: () => performance.now(),
+      random: Math.random,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (timer) => window.clearTimeout(timer),
+      dispatch: startAutoDispatch,
+      getIntervalSeconds: (index) => gameRef.current.schedulerRobots[index]?.intervalSeconds ?? 3,
+    });
+    robotSchedulerRef.current = scheduler;
+    const sync = () => scheduler.sync(gameRef.current.schedulerBots, !rebirthPausedRef.current && document.visibilityState === "visible" && gameRef.current.schedulerSeconds > 0 && !plotDraftRef.current && !placingPlotRef.current);
+    sync();
+    document.addEventListener("visibilitychange", sync);
     return () => {
-      window.clearInterval(timer);
-      autoFinishTimers.forEach((finishTimer) => window.clearTimeout(finishTimer));
-      autoFinishTimers.clear();
+      scheduler.dispose();
+      robotSchedulerRef.current = null;
+      document.removeEventListener("visibilitychange", sync);
+      autoTransferControllers.forEach((transition) => transition.cancel());
+      autoTransferControllers.clear();
     };
-    // Dispatch reads current game state from refs; rerunning this timer on each render is unnecessary.
+    // Dispatch reads current state through refs; keep its timer across renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const schedulerActive = !rebirthSceneHidden && game.schedulerSeconds > 0 && !placingPlot && !plotDraft;
+  useEffect(() => {
+    robotSchedulerRef.current?.sync(game.schedulerBots, schedulerActive && document.visibilityState === "visible");
+  }, [game.schedulerBots, schedulerActive, worldRevision]);
 
   useEffect(() => {
     if (!notice) return;
@@ -484,35 +730,34 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  useEffect(() => {
-    if (!trackedId || draggingId || panning) return;
-    const worker = game.workers.find((item) => item.id === trackedId);
-    const plot = worker ? displayPlots.find((item) => item.id === worker.zoneId) : null;
-    if (!worker) return;
-    const position = plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y };
-    const next = { x: (WORLD_W / 2 - position.x) * zoom, y: (WORLD_H / 2 - position.y) * zoom };
-    // Camera tracking is derived from the latest animated worker position.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setCamera((current) => current.x === next.x && current.y === next.y ? current : next);
-  }, [trackedId, draggingId, panning, game.workers, displayPlots, zoom]);
 
   useEffect(() => () => dragCleanupRef.current?.(), []);
 
   useEffect(() => {
     const cancelPlacement = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && placingPlotRef.current) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // Closing the inventory removes its focused button, so placement shortcuts
+      // must also work when keyboard focus has fallen back to the document body.
+      if (placingHoly) {
+        event.preventDefault();
+        setPlacingHoly(false);
+        setHolyPreview(null);
+        setNotice("已取消圣光放置");
+      }
+      if (placingPlotRef.current) {
+        event.preventDefault();
         cancelPurchasedPlot();
         setNotice("已取消地块摆放");
       }
     };
     window.addEventListener("keydown", cancelPlacement);
     return () => window.removeEventListener("keydown", cancelPlacement);
-  }, []);
+  }, [placingHoly]);
 
   function updateGame(updater: (current: GameState) => GameState) {
     setGame((current) => {
       const next = updater(current);
-      localStorage.setItem(SAVE_KEY, JSON.stringify(next));
+      persistGame(next);
       return next;
     });
   }
@@ -522,54 +767,124 @@ export default function Home() {
     return { x: (clientX - rect.left) / rect.width * WORLD_W, y: (clientY - rect.top) / rect.height * WORLD_H };
   }
 
-  function onWorkerDown(event: PointerEvent<HTMLDivElement>, id: string) {
-    event.stopPropagation();
-    if (draggingIdRef.current || placingPlotRef.current || plotDraftRef.current) return;
+  function renderedWorkerPosition(id: string) {
+    const element = worldRef.current?.querySelector(`[data-worker-id="${CSS.escape(id)}"]`) ?? null;
+    return readRenderedWorkerPosition(element) ?? getCanvasWorkerPosition(worldRef.current, id);
+  }
+
+  function clearWorkerHover() {
+    if (hoveredWorkerRef.current === null) return;
+    hoveredWorkerRef.current = null;
+    setHoveredWorker(null);
+  }
+
+  function pauseWorker(id: string, currentPosition: { x: number; y: number }) {
+    if (hoveredWorkerRef.current === id || draggingIdRef.current) return;
+    const worker = gameRef.current.workers.find((item) => item.id === id);
+    if (!worker || worker.status === "dragging") return;
+    finishForemanCycle(id);
+    hoveredWorkerRef.current = id;
+    setHoveredWorker(id);
+    setGame((current) => ({ ...current, workers: current.workers.map((item) => item.id === id
+      ? workerAtPoint(item, currentPosition, current.plots.find((plot) => plot.id === item.zoneId)) : item) }));
+  }
+
+  function onScenePointerDownCapture(event: PointerEvent<HTMLElement>) {
+    suppressWorkerClickRef.current = false;
+    if (rebirthPausedRef.current) return;
+    if (placingHoly) { onPanDown(event); return; }
+    if (placingPlotRef.current || plotDraftRef.current || draggingIdRef.current || event.button !== 0 || event.isPrimary === false) return;
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, input, select")) return;
+    const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
+    const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
+    if (id) onWorkerDown(event, id);
+  }
+
+  function onScenePointerMoveCapture(event: PointerEvent<HTMLElement>) {
+    if (placingHoly) { onPanMove(event); return; }
+    if (rebirthPausedRef.current || draggingIdRef.current || panPointerRef.current !== null || placingPlotRef.current || plotDraftRef.current || event.buttons !== 0 || event.pointerType === "touch") return;
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, input, select")) { clearWorkerHover(); return; }
+    const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
+    const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
+    if (!id) { if (!domWorker) clearWorkerHover(); return; }
+    const point = getCanvasWorkerPosition(worldRef.current, id);
+    if (point) { pauseWorker(id, point); setHoveredPlot(null); }
+  }
+
+  function onWorkerDown(event: PointerEvent<HTMLElement>, id: string) {
+    if (rebirthPausedRef.current || event.button !== 0 || event.isPrimary === false || draggingIdRef.current || placingPlotRef.current || plotDraftRef.current || placingHoly) return;
     const worker = gameRef.current.workers.find((item) => item.id === id);
     const interruptedTransfer = autoTransfersRef.current.find((transfer) => transfer.workerId === id);
     if (!worker || (worker.status === "dragging" && !interruptedTransfer)) return;
+    event.stopPropagation(); event.preventDefault();
+    const sourcePlot = gameRef.current.plots.find((plot) => plot.id === worker.zoneId);
+    const point = renderedWorkerPosition(id) ?? (sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y });
+    suppressWorkerClickRef.current = true;
+    finishPan(); finishForemanCycle(id); clearWorkerHover();
     if (interruptedTransfer) {
-      const finishTimer = autoFinishTimersRef.current.get(id);
-      if (finishTimer !== undefined) window.clearTimeout(finishTimer);
-      autoFinishTimersRef.current.delete(id);
+      autoTransferControllersRef.current.get(id)?.cancel();
+      autoTransferControllersRef.current.delete(id);
       replaceAutoTransfers((transfers) => transfers.filter((transfer) => transfer.workerId !== id));
-      autoCooldownRef.current[interruptedTransfer.botIndex] = 0;
+      robotSchedulerRef.current?.release(interruptedTransfer.botIndex);
     }
-    const originPlot = gameRef.current.plots.find((plot) => plot.id === worker.zoneId) ?? null;
-    dragOrigin.current = { ...worker, status: statusAfterDrop(worker, originPlot) };
-    dragElementRef.current = event.currentTarget;
-    dragPositionRef.current = { x: worker.x, y: worker.y };
+    // A cancelled ordinary drag returns to the exact visible source and keeps its status.
+    dragOrigin.current = interruptedTransfer
+      ? { ...worker, status: statusAfterDrop(worker, sourcePlot ?? null) }
+      : workerAtPoint(worker, point, sourcePlot);
+    dragElementRef.current = worldRef.current?.querySelector<HTMLDivElement>(`[data-worker-id="${CSS.escape(id)}"]`) ?? null;
+    dragPositionRef.current = point;
+    const pointer = positionInWorld(event.clientX, event.clientY);
+    dragGrabOffsetRef.current = { x: pointer.x - point.x, y: pointer.y - point.y };
     dragStart.current = { x: event.clientX, y: event.clientY };
+    dragMovedRef.current = false;
+    dragPointerRef.current = event.pointerId;
     draggingIdRef.current = id;
-    setSelectedId(id);
-    setDraggingId(id);
-    setGame((current) => ({ ...current, workers: current.workers.map((item) => item.id === id ? { ...item, status: "dragging" } : item) }));
-    const move = (nativeEvent: globalThis.PointerEvent) => moveWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
-    const finishPointer = (nativeEvent: globalThis.PointerEvent) => finishWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
-    const finishMouse = (nativeEvent: MouseEvent) => finishWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
+    setSelectedId(id); setDraggingId(id);
+    setGame((current) => ({ ...current, workers: current.workers.map((item) => item.id === id ? { ...item, ...point, status: "dragging" } : item) }));
+    const move = (nativeEvent: globalThis.PointerEvent) => {
+      if (nativeEvent.pointerId === dragPointerRef.current) moveWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
+    };
+    const finish = (nativeEvent: globalThis.PointerEvent) => {
+      if (nativeEvent.pointerId === dragPointerRef.current) finishWorkerDrag(nativeEvent.clientX, nativeEvent.clientY, id);
+    };
+    const cancelPointer = (nativeEvent: globalThis.PointerEvent) => { if (nativeEvent.pointerId === dragPointerRef.current) onWorkerCancel(id); };
     const cancel = () => onWorkerCancel(id);
+    const hidden = () => { if (document.hidden) cancel(); };
+    const escape = (nativeEvent: globalThis.KeyboardEvent) => {
+      if (nativeEvent.key === "Escape") { nativeEvent.preventDefault(); nativeEvent.stopPropagation(); cancel(); }
+    };
     window.addEventListener("pointermove", move, true);
-    window.addEventListener("pointerup", finishPointer, true);
-    window.addEventListener("mouseup", finishMouse, true);
-    window.addEventListener("pointercancel", cancel, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", cancelPointer, true);
     window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", escape, true);
+    document.addEventListener("visibilitychange", hidden);
     dragCleanupRef.current = () => {
       window.removeEventListener("pointermove", move, true);
-      window.removeEventListener("pointerup", finishPointer, true);
-      window.removeEventListener("mouseup", finishMouse, true);
-      window.removeEventListener("pointercancel", cancel, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", cancelPointer, true);
       window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", escape, true);
+      document.removeEventListener("visibilitychange", hidden);
     };
+  }
+
+  function dragPoint(clientX: number, clientY: number) {
+    const pointer = positionInWorld(clientX, clientY);
+    return { x: pointer.x - dragGrabOffsetRef.current.x, y: pointer.y - dragGrabOffsetRef.current.y };
   }
 
   function moveWorkerDrag(clientX: number, clientY: number, id: string) {
     if (draggingIdRef.current !== id) return;
-    const point = positionInWorld(clientX, clientY);
+    dragMovedRef.current ||= Math.hypot(clientX - dragStart.current.x, clientY - dragStart.current.y) > 5;
+    if (!dragMovedRef.current) return;
+    const point = dragPoint(clientX, clientY);
     const target = findPlot(gameRef.current.plots, point.x, point.y);
     setHoveredPlot(target?.id ?? null);
     dragPositionRef.current = point;
-    const element = dragElementRef.current;
+    const element = dragElementRef.current?.isConnected ? dragElementRef.current : worldRef.current?.querySelector<HTMLDivElement>(`[data-worker-id="${CSS.escape(id)}"]`);
     if (element) {
+      dragElementRef.current = element;
       element.style.setProperty("--worker-x", `${point.x}px`);
       element.style.setProperty("--worker-y", `${point.y}px`);
       const facingLeft = point.x < (dragOrigin.current?.x ?? point.x);
@@ -579,83 +894,48 @@ export default function Home() {
   }
 
   function pauseWorkerAtCursor(event: PointerEvent<HTMLDivElement>, id: string) {
-    if (draggingIdRef.current === id) return;
-    if (gameRef.current.workers.find((worker) => worker.id === id)?.status === "dragging") return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const currentPosition = positionInWorld(rect.left + rect.width / 2, rect.top + rect.height * .92);
-    hoveredWorkerRef.current = id;
-    setHoveredWorker(id);
-    setGame((current) => ({
-      ...current,
-      workers: current.workers.map((worker) => {
-        if (worker.id !== id) return worker;
-        const plot = current.plots.find((item) => item.id === worker.zoneId);
-        if (!plot) return { ...worker, ...currentPosition };
-        const raw = unproject(plot, currentPosition.x, currentPosition.y);
-        const u = Math.max(.4, Math.min(plot.cols - .4, raw.u));
-        const v = Math.max(.4, Math.min(plot.rows - .4, raw.v));
-        return { ...worker, u, v, ...project(plot, u, v) };
-      }),
-    }));
+    if (rebirthPausedRef.current) return;
+    const point = readRenderedWorkerPosition(event.currentTarget);
+    if (point) pauseWorker(id, point);
+  }
+
+  function releaseWorkerDrag() {
+    dragCleanupRef.current?.(); dragCleanupRef.current = null;
+    dragOrigin.current = null; dragElementRef.current = null; dragPositionRef.current = null;
+    draggingIdRef.current = null; dragPointerRef.current = null;
+    setDraggingId(null); setHoveredPlot(null); clearWorkerHover();
   }
 
   function finishWorkerDrag(clientX: number, clientY: number, id: string) {
-    if (draggingIdRef.current !== id) return;
-    dragCleanupRef.current?.();
-    dragCleanupRef.current = null;
-    const point = positionInWorld(clientX, clientY);
-    const target = findPlot(gameRef.current.plots, point.x, point.y);
-    const origin = dragOrigin.current;
-    const moved = Math.hypot(clientX - dragStart.current.x, clientY - dragStart.current.y) > 5;
-    const full = target ? gameRef.current.workers.filter((worker) => worker.id !== id && worker.zoneId === target.id).length >= plotCapacity(target) : false;
-    const disabled = Boolean(target && target.enabled === false);
-    if (full) setNotice(`${target?.name}已达到${target ? plotCapacity(target) : 0}人上限`);
-    else if (disabled) setNotice("该地块已停用，请先在地块管理中启用");
-    setGame((current) => {
-      const next: GameState = {
-        ...current,
-        workers: current.workers.map((worker) => {
-          if (worker.id !== id) return worker;
-          if (!moved || !origin || !target || full || disabled) return origin ? restoreWorker(origin, current.plots) : worker;
-          const raw = unproject(target, point.x, point.y);
-          const u = Math.max(.4, Math.min(target.cols - .4, raw.u));
-          const v = Math.max(.4, Math.min(target.rows - .4, raw.v));
-          const changedZone = worker.zoneId !== target.id;
-          const source = current.plots.find((plot) => plot.id === origin.zoneId);
-          const lastWorkZoneId = target.type === "living"
-            ? (source && source.type !== "living" ? source.id : worker.lastWorkZoneId)
-            : target.id;
-          return { ...worker, zoneId: target.id, u, v, ...project(target, u, v), duration: 500, facing: point.x < origin.x ? "left" : "right", status: statusAfterDrop(origin, target), lastWorkZoneId, continuousWork: changedZone ? 0 : worker.continuousWork, slowStacks: changedZone ? 0 : worker.slowStacks, lazyElapsed: 0 };
-        }),
-      };
-      localStorage.setItem(SAVE_KEY, JSON.stringify(next));
-      return next;
-    });
-    dragOrigin.current = null;
-    dragElementRef.current = null;
-    dragPositionRef.current = null;
-    draggingIdRef.current = null;
-    setDraggingId(null);
-    setHoveredPlot(null);
+    if (draggingIdRef.current !== id || !dragOrigin.current) return;
+    const current = gameRef.current;
+    const worker = current.workers.find((item) => item.id === id);
+    if (!worker) { releaseWorkerDrag(); return; }
+    const point = dragPoint(clientX, clientY);
+    const moved = dragMovedRef.current || Math.hypot(clientX - dragStart.current.x, clientY - dragStart.current.y) > 5;
+    const result = resolveWorkerDrop(worker, dragOrigin.current, point, moved, current.plots, current.workers, autoTransfersRef.current);
+    const visible = renderedWorkerPosition(id) ?? dragPositionRef.current;
+    if (visible) setCanvasWorkerHandoff(worldRef.current, id, visible);
+    if (result.notice) setNotice(result.notice);
+    updateGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === id ? result.worker : item) }));
+    releaseWorkerDrag();
   }
 
   function onWorkerCancel(id: string) {
-    if (draggingIdRef.current !== id) return;
-    dragCleanupRef.current?.();
-    dragCleanupRef.current = null;
-    const origin = dragOrigin.current;
-    setGame((current) => ({ ...current, workers: current.workers.map((worker) => worker.id === id && origin ? restoreWorker(origin, current.plots) : worker) }));
-    dragOrigin.current = null;
-    dragElementRef.current = null;
-    dragPositionRef.current = null;
-    draggingIdRef.current = null;
-    setDraggingId(null);
-    setHoveredPlot(null);
+    if (draggingIdRef.current !== id || !dragOrigin.current) return;
+    const origin = { ...dragOrigin.current, duration: 500 };
+    const point = renderedWorkerPosition(id) ?? dragPositionRef.current;
+    if (point) setCanvasWorkerHandoff(worldRef.current, id, point);
+    setGame((current) => ({ ...current, workers: current.workers.map((worker) => worker.id === id ? origin : worker) }));
+    setNotice("已取消人物拖拽"); releaseWorkerDrag();
   }
 
   function onPlotDown(event: PointerEvent<HTMLDivElement>, plot: PlotState) {
     event.stopPropagation();
     if (draggingId || placingPlot) return;
+    for (const [id, cycle] of foremanCyclesRef.current) {
+      if (cycle.zoneId === plot.id) finishForemanCycle(id);
+    }
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = positionInWorld(event.clientX, event.clientY);
@@ -663,6 +943,15 @@ export default function Home() {
       x: point.x - (plot.x + plot.cols * TILE_W / 2),
       y: point.y - (plot.y + plot.rows * TILE_H / 2),
     };
+    // Canvas walkers may still be between their logical destinations. Preserve
+    // the painted points before this moving plot switches its occupants to DOM.
+    const frozen = new Map(gameRef.current.workers.filter((worker) => worker.zoneId === plot.id
+      && !autoTransfersRef.current.some((transfer) => transfer.workerId === worker.id))
+      .map((worker) => [worker.id, renderedWorkerPosition(worker.id)]));
+    setGame((current) => ({ ...current, workers: current.workers.map((worker) => {
+      const point = frozen.get(worker.id);
+      return point ? workerAtPoint(worker, point, plot) : worker;
+    }) }));
     const draft = { plot: { ...plot }, valid: true, original: { ...plot } };
     plotDraftRef.current = draft;
     setPlotDraft(draft);
@@ -696,8 +985,9 @@ export default function Home() {
       const original = gameRef.current.plots.find((plot) => plot.id === plotId);
       if (original && gameRef.current.plots.filter((plot) => plot.type === original.type).length <= 1) {
         setNotice(`至少需要保留一个${original.name}`);
-      } else if (gameRef.current.workers.some((worker) => worker.zoneId === plotId)) {
-        setNotice("请先将地块上的人物移走再回收");
+      } else if (gameRef.current.workers.some((worker) => worker.zoneId === plotId)
+        || autoTransfersRef.current.some((transfer) => transfer.targetId === plotId)) {
+        setNotice("请先将地块上的人物移走，并等待搬入完成后再回收");
       } else if (original) {
         const refund = Math.floor(original.purchasePrice * .7);
         updateGame((current) => recyclePlot(current, plotId));
@@ -786,82 +1076,78 @@ export default function Home() {
   }
 
   function startAutoDispatch(botIndex: number) {
+    if (rebirthPausedRef.current) return false;
     const current = gameRef.current;
     if (
       current.schedulerSeconds <= 0 ||
       autoTransfersRef.current.some((transfer) => transfer.botIndex === botIndex) ||
-      Date.now() < (autoCooldownRef.current[botIndex] ?? 0) ||
       plotDraftRef.current ||
       placingPlotRef.current
-    ) return;
+    ) return false;
 
-    const decision = chooseAutoDispatch(
+    const decision = measureGameTask("dispatch", () => chooseAutoDispatch(
       current,
       [...autoTransfersRef.current.map((transfer) => transfer.workerId), ...(draggingIdRef.current ? [draggingIdRef.current] : [])],
       autoTransfersRef.current.filter((transfer) => transfer.action !== "wake").map((transfer) => transfer.targetId),
       current.schedulerRobots[botIndex]?.duties,
-    );
+    ));
     const worker = decision ? current.workers.find((item) => item.id === decision.workerId) : undefined;
     const target = decision ? current.plots.find((plot) => plot.id === decision.targetId) : undefined;
 
-    if (!worker || !target) {
-      autoCooldownRef.current[botIndex] = Date.now() + 800;
-      return;
-    }
+    if (!worker || !target) return false;
     const epoch = simulationEpochRef.current;
     const sourcePlot = current.plots.find((plot) => plot.id === worker.zoneId);
-    const from = sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y };
-    const u = decision!.action === "wake" ? worker.u : .75 + Math.random() * Math.max(.5, target.cols - 1.5);
-    const v = decision!.action === "wake" ? worker.v : .75 + Math.random() * Math.max(.5, target.rows - 1.5);
-    const to = project(target, u, v);
+    const from = renderedWorkerPosition(worker.id) ?? (sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y });
+    if (hoveredWorkerRef.current === worker.id) clearWorkerHover();
+    const waking = decision!.action === "wake";
+    const atSource = workerAtPoint(worker, from, sourcePlot);
+    const u = waking ? atSource.u : .75 + Math.random() * Math.max(.5, target.cols - 1.5);
+    const v = waking ? atSource.v : .75 + Math.random() * Math.max(.5, target.rows - 1.5);
+    const to = waking ? from : project(target, u, v);
     const robot = current.schedulerRobots[botIndex] ?? { efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } };
-    const durationMs = Math.max(450, Math.round((decision!.action === "wake" ? 1400 : 1800) / (robot.efficiency * (current.effects.smartLeader > 0 ? 2 : 1))));
-    const transfer: AutoTransfer = { botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, action: decision!.action };
-    setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker!.id ? { ...item, status: "dragging" } : item) }));
+    const durationMs = Math.max(450, Math.round((waking ? 1400 : 1800) / (robot.efficiency * (current.effects.smartLeader > 0 ? 2 : 1))));
+    const token = ++transferTokenRef.current;
+    const transfer: AutoTransfer = { token, botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, action: decision!.action };
+    const isCurrent = () => epoch === simulationEpochRef.current && autoTransfersRef.current.some((value) => value.token === token);
+    setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker.id ? { ...item, status: "dragging" } : item) }));
     replaceAutoTransfers((transfers) => [...transfers, transfer]);
-    window.requestAnimationFrame(() => {
-      if (epoch !== simulationEpochRef.current) return;
-      replaceAutoTransfers((transfers) => transfers.map((value) => value.workerId === worker!.id ? { ...value, active: true } : value));
+    const transition = startWorkerTransfer({
+      requestFrame: (callback) => window.requestAnimationFrame(callback),
+      cancelFrame: (frame) => window.cancelAnimationFrame(frame),
+      setTimer: (callback, ms) => window.setTimeout(callback, ms),
+      clearTimer: (timer) => window.clearTimeout(timer),
+    }, durationMs, {
+      activate: () => {
+        if (!isCurrent()) return;
+        replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, active: true } : value));
+      },
+      land: () => {
+        if (!isCurrent()) return;
+        replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, landing: true } : value));
+      },
+      complete: () => {
+        if (!isCurrent()) return;
+        const visible = renderedWorkerPosition(worker.id);
+        if (visible) setCanvasWorkerHandoff(worldRef.current, worker.id, visible);
+        setGame((state) => {
+          if (epoch !== simulationEpochRef.current) return state;
+          const destination = state.plots.find((plot) => plot.id === target.id);
+          const source = state.plots.find((plot) => plot.id === worker.zoneId);
+          if (!destination) return state;
+          return { ...state, workers: state.workers.map((item) => item.id === worker.id ? {
+            ...item, zoneId: destination.id, u, v, ...project(destination, u, v),
+            status: statusAfterDrop(item, destination), duration: 500,
+            lastWorkZoneId: destination.type === "living" ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId) : destination.id,
+            continuousWork: 0, slowStacks: 0, lazyElapsed: 0, lazyCheckInterval: undefined,
+          } : item) };
+        });
+        replaceAutoTransfers((transfers) => transfers.filter((value) => value.token !== token));
+        robotSchedulerRef.current?.complete(botIndex);
+        autoTransferControllersRef.current.delete(worker.id);
+      },
     });
-    const finishTimer = window.setTimeout(() => {
-      if (epoch !== simulationEpochRef.current) return;
-      setGame((state) => {
-        if (epoch !== simulationEpochRef.current) return state;
-        const destination = state.plots.find((plot) => plot.id === target!.id);
-        const source = state.plots.find((plot) => plot.id === worker!.zoneId);
-        if (!destination) return state;
-        const next: GameState = {
-          ...state,
-          workers: state.workers.map((item) => item.id === worker!.id ? {
-            ...item,
-            zoneId: destination.id,
-            u,
-            v,
-            ...project(destination, u, v),
-            status: statusAfterDrop(item, destination),
-            duration: 500,
-            lastWorkZoneId: destination.type === "living"
-              ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId)
-              : destination.id,
-            continuousWork: 0,
-            slowStacks: 0,
-            lazyElapsed: 0,
-          } : item),
-        };
-        localStorage.setItem(SAVE_KEY, JSON.stringify(next));
-        return next;
-      });
-      replaceAutoTransfers((transfers) => transfers.filter((value) => value.workerId !== worker!.id));
-      autoCooldownRef.current[botIndex] = Date.now() + robot.intervalSeconds * 1000;
-      autoFinishTimersRef.current.delete(worker!.id);
-    }, durationMs + 50);
-    autoFinishTimersRef.current.set(worker.id, finishTimer);
-  }
-
-  function onWheel(event: WheelEvent<HTMLElement>) {
-    if ((event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel")) return;
-    event.preventDefault();
-    setZoom((value) => Math.max(.28, Math.min(1.5, value * (event.deltaY > 0 ? .9 : 1.1))));
+    autoTransferControllersRef.current.set(worker.id, transition);
+    return true;
   }
 
   function onPanDown(event: PointerEvent<HTMLElement>) {
@@ -882,8 +1168,16 @@ export default function Home() {
       return;
     }
     if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog")) return;
+    if (panPointerRef.current !== null) return;
+    panPointerRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
-    panOrigin.current = { clientX: event.clientX, clientY: event.clientY, ...camera };
+    const position = beginPan();
+    // Panning interrupts zoom easing at the displayed scale, avoiding a first-frame jump.
+    if (worldRef.current) {
+      const scale = worldRef.current.getBoundingClientRect().width / WORLD_W;
+      if (Number.isFinite(scale) && scale > 0 && Math.abs(scale - zoom) > .000001) setZoom(scale);
+    }
+    panOrigin.current = { clientX: event.clientX, clientY: event.clientY, ...position };
     setTrackedId(null);
     setPanning(true);
   }
@@ -894,16 +1188,14 @@ export default function Home() {
       return;
     }
     if (placingPlotRef.current) return updatePlotPlacement(event.clientX, event.clientY);
-    if (!panning) return;
-    setCamera({ x: panOrigin.current.x + event.clientX - panOrigin.current.clientX, y: panOrigin.current.y + event.clientY - panOrigin.current.clientY });
+    if (panPointerRef.current !== event.pointerId) return;
+    panCamera({ x: panOrigin.current.x + event.clientX - panOrigin.current.clientX, y: panOrigin.current.y + event.clientY - panOrigin.current.clientY });
   }
 
   function trackWorker(worker: WorkerState) {
+    finishPan();
     setSelectedId(worker.id);
     setTrackedId(worker.id);
-    const plot = displayPlots.find((item) => item.id === worker.zoneId);
-    const position = plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y };
-    setCamera({ x: (WORLD_W / 2 - position.x) * zoom, y: (WORLD_H / 2 - position.y) * zoom });
   }
 
   function toggleManager(section: "workers" | "robots" | "plots") {
@@ -946,19 +1238,26 @@ export default function Home() {
   }
 
   function installGame(next: GameState) {
+    rebirthPausedRef.current = false;
+    rebirthSourceRef.current = null;
+    setRebirthError("");
+    setRebirthStage(next.rebirthCount > 0 ? "reborn" : "ready");
+    finishPan();
     // Invalidate old-world responses, delayed robot transfers and drag handlers
     // before replacing a save. They must never write into the imported world.
     simulationEpochRef.current += 1;
     pendingSimulationRef.current = null;
     unsimulatedSecondsRef.current = 0;
     simulationLastTimeRef.current = performance.now();
-    autoFinishTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    autoFinishTimersRef.current.clear();
-    autoCooldownRef.current = [];
+    autoTransferControllersRef.current.forEach((transition) => transition.cancel());
+    autoTransferControllersRef.current.clear();
+    robotSchedulerRef.current?.reset();
     replaceAutoTransfers(() => []);
     dragCleanupRef.current?.();
     dragCleanupRef.current = null;
     draggingIdRef.current = null;
+    dragPointerRef.current = null;
+    clearCanvasWorkerHandoffs(worldRef.current);
     dragOrigin.current = null;
     dragElementRef.current = null;
     dragPositionRef.current = null;
@@ -966,6 +1265,9 @@ export default function Home() {
     placingPlotRef.current = null;
     hoveredWorkerRef.current = null;
     movementCursorRef.current = 0;
+    foremanCyclesRef.current.clear();
+    foremanCommandAtRef.current.clear();
+    setCommandingForemen(new Set());
     gameRef.current = next;
     setGame(next);
     setWorldRevision((revision) => revision + 1);
@@ -984,14 +1286,13 @@ export default function Home() {
     setPanel(null);
     setPlacingHoly(false);
     setHolyPreview(null);
-    setResetArmed(false);
   }
 
   function importSave(next: GameState) {
     const backup = exportGameSave(gameRef.current);
     try {
       localStorage.setItem(SAVE_BACKUP_KEY, backup);
-      localStorage.setItem(SAVE_KEY, JSON.stringify(next));
+      persistGame(next);
     } catch {
       throw new Error("浏览器无法保存存档，当前进度未替换。请先导出备份后重试。");
     }
@@ -999,14 +1300,76 @@ export default function Home() {
   }
 
   function resetGame() {
-    if (!resetArmed) {
-      setResetArmed(true);
-      window.setTimeout(() => setResetArmed(false), 3000);
+    const fresh = createInitialState(initialPoint.x, initialPoint.y);
+    persistGame(fresh);
+    installGame(fresh);
+    setRebirthStage("ready");
+    setNotice("");
+    setSettingsOpen(false);
+  }
+
+  function beginRebirth() {
+    if (rebirthPausedRef.current || !canFirstRebirth(gameRef.current)) return;
+    rebirthSourceRef.current = gameRef.current;
+    setRebirthError("");
+    // Keep the old scene visible for its farewell, but stop it from producing,
+    // moving to new targets, or applying late robot/simulation results.
+    rebirthPausedRef.current = true;
+    simulationEpochRef.current += 1;
+    pendingSimulationRef.current = null;
+    unsimulatedSecondsRef.current = 0;
+    autoTransferControllersRef.current.forEach((transition) => transition.cancel());
+    autoTransferControllersRef.current.clear();
+    robotSchedulerRef.current?.sync(gameRef.current.schedulerBots, false);
+    finishPan();
+    setTrackedId(null);
+    setHoveredPlot(null);
+    setPanel(null);
+    setNotice("");
+    setPlacingHoly(false);
+    setHolyPreview(null);
+    placingPlotRef.current = null;
+    setPlacingPlot(null);
+    setSettingsOpen(false);
+    const frozenWorkers = gameRef.current.workers.map((worker) => {
+      const point = renderedWorkerPosition(worker.id);
+      return point ? workerAtPoint(worker, point, gameRef.current.plots.find((plot) => plot.id === worker.zoneId)) : worker;
+    });
+    setGame((current) => ({ ...current, workers: frozenWorkers }));
+    replaceAutoTransfers((transfers) => transfers.map((transfer) => {
+      const point = renderedWorkerPosition(transfer.workerId) ?? transfer.from;
+      return { ...transfer, from: point, to: point, durationMs: 0 };
+    }));
+    setRebirthStage("dissolving");
+  }
+
+  function finishRebirthTransition() {
+    setRebirthStage((stage) => stage === "dissolving" ? "reward" : stage);
+  }
+
+  function continueRebirth() {
+    if (!rebirthPausedRef.current || rebirthStage !== "reward" || !rebirthSourceRef.current) return;
+    const source = rebirthSourceRef.current;
+    let fresh: GameState | null;
+    try {
+      fresh = saveFirstRebirth(source, {
+        backup: (previous) => localStorage.setItem(SAVE_BACKUP_KEY, exportGameSave(previous)),
+        save: (next) => persistGame(next),
+      });
+    } catch {
+      setRebirthError("未能保存新工坊，原有进度已保留。请腾出浏览器存储空间后重试。");
       return;
     }
-    const fresh = createInitialState(initialPoint.x, initialPoint.y);
-    localStorage.setItem(SAVE_KEY, JSON.stringify(fresh));
+    if (!fresh) {
+      setRebirthError("当前进度不满足首次转生条件，尚未替换原有进度。");
+      return;
+    }
+    // Only replace the world after both the backup and new save have succeeded.
     installGame(fresh);
+    const foreman = fresh.workers.find(isForeman)!;
+    setZoom(.8);
+    trackWorker(foreman);
+    setNotice("包工头已加入新工坊，拖到地块上即可发挥守护效果。");
   }
 
   const renderedPlots = placingPlot ? [...displayPlots, placingPlot.plot] : displayPlots;
@@ -1023,34 +1386,56 @@ export default function Home() {
     return point.x >= visibleBounds.left && point.x <= visibleBounds.right && point.y >= visibleBounds.top && point.y <= visibleBounds.bottom;
   });
 
+  const shouldDrawOnCanvas = (worker: WorkerState) => !rebirthSceneHidden && !isForeman(worker)
+    && worker.id !== draggingId
+    && !autoTransferByWorker.has(worker.id) && plotDraft?.plot.id !== worker.zoneId;
+  const canvasWorkers = visibleWorkers.filter(shouldDrawOnCanvas).map((worker) => {
+    const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
+    return { worker, projected: plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y }, tracked: worker.id === trackedId || worker.id === selectedId, hovered: worker.id === hoveredWorker };
+  });
+
+  const occlusionDepths = visibleWorkers.filter((worker) => isForeman(worker) && worker.id !== draggingId
+    && !autoTransferByWorker.has(worker.id) && plotDraft?.plot.id !== worker.zoneId).map((worker) => {
+    const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
+    return sceneDepth(plot ? project(plot, worker.u, worker.v).y : worker.y);
+  });
+
   return (
     <main
-      className={`viewport ${panning ? "is-panning" : ""} ${placingPlot || placingHoly ? "is-placing" : ""}`}
+      ref={viewportRef}
+      className={`viewport ${rebirthSceneHidden ? rebirthTransitionStyles.transitioning : ""} ${panning ? "is-panning" : ""} ${placingPlot || placingHoly ? "is-placing" : ""}`}
+      data-rebirth-stage={rebirthStage}
       aria-label="2.5D 采集加工经营场景"
-      onWheel={onWheel}
-      onKeyDown={(event: KeyboardEvent<HTMLElement>) => { if (event.key === "+" || event.key === "=") setZoom((value) => Math.min(1.5, value * 1.1)); if (event.key === "-") setZoom((value) => Math.max(.28, value * .9)); if (event.key === "Escape" && placingPlotRef.current) { cancelPurchasedPlot(); setNotice("已取消地块摆放"); } if (event.key === "Escape" && placingHoly) { setPlacingHoly(false); setHolyPreview(null); setNotice("已取消圣光放置"); } }}
+      onKeyDown={(event: KeyboardEvent<HTMLElement>) => { if (rebirthPausedRef.current) return; if (event.key === "+" || event.key === "=") setZoom((value) => Math.min(1.5, value * 1.1)); if (event.key === "-") setZoom((value) => Math.max(.28, value * .9)); }}
+      onClickCapture={(event) => { if (suppressWorkerClickRef.current) { suppressWorkerClickRef.current = false; event.preventDefault(); event.stopPropagation(); } }}
       onPointerDown={onPanDown}
-      onPointerDownCapture={placingHoly ? onPanDown : undefined}
+      onPointerDownCapture={onScenePointerDownCapture}
       onPointerMove={placingHoly ? undefined : onPanMove}
-      onPointerMoveCapture={placingHoly ? onPanMove : undefined}
-      onPointerUp={() => setPanning(false)}
-      onPointerCancel={() => setPanning(false)}
+      onPointerMoveCapture={onScenePointerMoveCapture}
+      onPointerLeave={clearWorkerHover}
+      onPointerUp={finishPan}
+      onPointerCancel={finishPan}
+      onLostPointerCapture={finishPan}
       tabIndex={0}
     >
       <header className="hud" onPointerDown={(event) => event.stopPropagation()}>
-        <div className="brand-chip">Plot Workers</div>
-        <Resource label="金币" value={game.coins} accent />
-        <Resource label="原料" value={game.inventory.raw} warning={game.inventory.raw <= 0} />
-        <Resource label="罐头" value={game.inventory.cans} warning={game.inventory.cans < 20} />
-        <Resource label="粗制/精制" value={`${format(game.inventory.rough)}/${format(game.inventory.refined)}`} />
-        <Resource label="螺丝/钢筋" value={`${format(game.inventory.screws)}/${format(game.inventory.rebar)}`} />
-        {game.schedulerBots > 0 && <Resource label="机器人时间/数量" value={`${Math.ceil(game.schedulerSeconds)}s/${game.schedulerBots}台`} warning={game.schedulerSeconds < 60} />}
-        <button className="reset-button" onClick={resetGame}>{resetArmed ? "再次点击确认" : "重新开始"}</button>
-        <button className="settings-button" aria-label="设置与存档" title="设置与存档" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m9.5 3-.5 2a7 7 0 0 0-1.8 1L5.3 5.4 3.2 9l1.5 1.4a7 7 0 0 0 0 2.2L3.2 14l2.1 3.6 1.9-.6a7 7 0 0 0 1.8 1l.5 2h4l.5-2a7 7 0 0 0 1.8-1l1.9.6 2.1-3.6-1.5-1.4a7 7 0 0 0 0-2.2L19.8 9l-2.1-3.6-1.9.6A7 7 0 0 0 14 5l-.5-2z"/><circle cx="11.5" cy="11.5" r="3"/></svg></button>
+        <div className="hud-resources">
+          <div className="brand-chip">Plot Workers</div>
+          <Resource label="金币" value={game.coins} accent />
+          <Resource label="原料" value={game.inventory.raw} warning={game.inventory.raw <= 0} />
+          <Resource label="罐头" value={game.inventory.cans} warning={game.inventory.cans < 20} />
+          <Resource label="粗制/精制" value={`${format(game.inventory.rough)}/${format(game.inventory.refined)}`} />
+          <Resource label="螺丝/钢筋" value={`${format(game.inventory.screws)}/${format(game.inventory.rebar)}`} />
+          {game.schedulerBots > 0 && <Resource label="机器人时间/数量" value={`${Math.ceil(game.schedulerSeconds)}s/${game.schedulerBots}台`} warning={game.schedulerSeconds < 60} />}
+        </div>
+        <button className="settings-button" aria-label="设置与存档" title="设置与存档" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-.5 2a7 7 0 0 0-1.8 1l-2-.6-2 3.5 1.5 1.5a7 7 0 0 0 0 3.2l-1.5 1.5 2 3.5 2-.6a7 7 0 0 0 1.8 1l.5 2h4l.5-2a7 7 0 0 0 1.8-1l2 .6 2-3.5-1.5-1.5a7 7 0 0 0 0-3.2l1.5-1.5-2-3.5-2 .6a7 7 0 0 0-1.8-1L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </header>
-      {settingsOpen && <SettingsDialog game={game} onClose={() => setSettingsOpen(false)} onImport={importSave} />}
+      {settingsOpen && <SettingsDialog game={game} onClose={() => setSettingsOpen(false)} onImport={importSave} onReset={resetGame} performanceEnabled={performanceEnabled} onPerformanceChange={(enabled) => { setPerformanceEnabled(enabled); localStorage.setItem(PERFORMANCE_KEY, String(enabled)); }} rebirth={{ completed: game.rebirthCount > 0, onRebirth: beginRebirth }} />}
+      {rebirthStage === "dissolving" && <RebirthTransition onComplete={finishRebirthTransition} />}
+      {rebirthStage === "reward" && <RebirthReveal onContinue={continueRebirth} error={rebirthError} />}
+      <PerformanceOverlay enabled={performanceEnabled} workers={game.workers.length} robots={game.schedulerBots} />
 
-      <div className={`world ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, "--camera-x": `${camera.x}px`, "--camera-y": `${camera.y}px` } as CSSProperties}>
+      <div key={`world-${worldRevision}`} className={`world ${rebirthSceneHidden ? rebirthTransitionStyles.worldDissolving : ""} ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom } as CSSProperties}>
         {game.effects.holyLight && <div className="ground-event holy-zone" style={{ left: game.effects.holyLight.x - 8 * 52, top: game.effects.holyLight.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(game.effects.holyLight.remaining)}s</span></div>}
         {placingHoly && holyPreview && <div className="ground-event holy-zone holy-preview" style={{ left: holyPreview.x - 8 * 52, top: holyPreview.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光覆盖范围 · 半径8格</span></div>}
         {visiblePlots.map((plot) => {
@@ -1059,15 +1444,23 @@ export default function Home() {
           const valid = isPlacement ? placingPlot.valid : isMoving ? plotDraft.valid : true;
           const count = workerCountByPlot.get(plot.id) ?? 0;
           const operational = plot.enabled !== false;
+          const guarded = operational && guardedPlots.has(plot.id);
           const holyBonus = operational && plot.type !== "living" && Boolean(game.effects.holyLight && circleHitsPlot(game.effects.holyLight.x, game.effects.holyLight.y, 8, plot));
           return <section
-            className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
+            className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${guarded ? "is-guarded" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
+            data-plot-id={plot.id}
             key={plot.id}
-            style={{ left: plot.x, top: plot.y, width: plot.cols * TILE_W, height: plot.rows * TILE_H + CUBE_DEPTH, zIndex: isMoving || isPlacement ? PLOT_DRAG_Z : undefined, "--cols": plot.cols, "--rows": plot.rows, "--plot-width": `${plot.cols * TILE_W}px`, "--plot-height": `${plot.rows * TILE_H}px` } as CSSProperties}
+            style={{ "--rebirth-delay": `${rebirthDelayByPlot.get(plot.id) ?? 0}ms`, left: plot.x, top: plot.y, width: plot.cols * TILE_W, height: plot.rows * TILE_H + CUBE_DEPTH, zIndex: isMoving || isPlacement ? PLOT_DRAG_Z : undefined, "--cols": plot.cols, "--rows": plot.rows, "--plot-width": `${plot.cols * TILE_W}px`, "--plot-height": `${plot.rows * TILE_H}px` } as CSSProperties}
           >
-            <div className="plot-shadow" />
-            <div className="plot-base" aria-hidden="true"><span className="base-left" /><span className="base-right" /></div>
-            <PlotSurface plot={plot} />
+            {!rebirthSceneHidden && !layeredPlotIds.has(plot.id) && !isMoving && !isPlacement && hoveredPlot !== plot.id && operational ? <img
+              className="plot-baked" src={`/plot-baked-${plot.type}-${plot.cols}.png`} alt="" draggable={false}
+              style={{ width: plot.cols * TILE_W, height: Math.ceil((plot.rows * TILE_H + CUBE_DEPTH) * 1.08) }}
+            /> : <>
+              <div className="plot-shadow" />
+              <div className="plot-base" aria-hidden="true"><span className="base-left" /><span className="base-right" /></div>
+              <PlotSurface plot={plot} />
+            </>}
+            {guarded && <ForemanAura />}
             {holyBonus && <div className="plot-bonus-effect" aria-label="当前地块加成"><div className="plot-bonus-ripples" aria-hidden="true"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vectorEffect="non-scaling-stroke" /></svg></div><div className="plot-bonus-labels"><span>圣光</span></div></div>}
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
@@ -1078,7 +1471,8 @@ export default function Home() {
           </section>;
         })}
 
-        {visibleWorkers.map((worker) => {
+        {!rebirthSceneHidden && <CanvasWorkers workers={canvasWorkers} worldRef={worldRef} zoom={zoom} population={game.workers.length} occlusionDepths={occlusionDepths} />}
+        {visibleWorkers.filter((worker) => !shouldDrawOnCanvas(worker)).map((worker) => {
           const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
           const autoTransfer = autoTransferByWorker.get(worker.id);
           const automated = Boolean(autoTransfer);
@@ -1089,9 +1483,9 @@ export default function Home() {
             : !plot
               ? { x: worker.x, y: worker.y }
               : project(plot, worker.u, worker.v);
-          return <WalkerSprite key={worker.id} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id} hovered={hoveredWorker === worker.id} raised={plotDraft?.plot.id === worker.zoneId} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={() => { hoveredWorkerRef.current = null; setHoveredWorker(null); }} />;
+          return <WalkerSprite key={worker.id} worldRef={worldRef} rebirthDelay={rebirthDelayByPlot.get(worker.zoneId ?? "") ?? 0} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id || selectedId === worker.id} hovered={hoveredWorker === worker.id} raised={plotDraft?.plot.id === worker.zoneId} foremanCommanding={commandingForemen.has(worker.id) && plot?.enabled !== false} onCommandEnd={finishForemanCycle} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={clearWorkerHover} />;
         })}
-        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
+        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.landing ? "is-landing" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
       </div>
 
       <aside className="utility-dock" aria-label="订单与背包" onPointerDown={(event) => event.stopPropagation()}>
@@ -1146,7 +1540,7 @@ function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { worke
   const end = Math.min(workers.length, start + 13);
   return <div className="worker-list" style={{ height: Math.min(290, workers.length * WORKER_ROW_HEIGHT + 12) }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
     <div className="worker-list-inner" style={{ height: workers.length * WORKER_ROW_HEIGHT }}>
-      {workers.slice(start, end).map((worker, offset) => <button key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} onClick={() => onSelect(worker)}><i /><span><strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}</strong><small>{STATUS_NAMES[worker.status]}</small></span><b>{Math.round(worker.mood)}</b></button>)}
+      {workers.slice(start, end).map((worker, offset) => <button key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} data-foreman={isForeman(worker) || undefined} onClick={() => onSelect(worker)}><i /><span><strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}</strong><small>{isForeman(worker) ? "守护工人" : STATUS_NAMES[worker.status]}</small></span><b>{isForeman(worker) ? "∞" : Math.round(worker.mood)}</b></button>)}
     </div>
   </div>;
 }
@@ -1179,7 +1573,7 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
     <div className="manager-head"><strong>人物管理</strong><span>{workers.length}人</span><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
     {workersOpen && <><VirtualWorkerList workers={workers} selectedId={selected?.id} trackedId={trackedId} onSelect={onSelect} />
-    {selected && <div className="manager-detail"><div><strong>{selected.name}</strong><span>{PERSONALITY_NAMES[selected.personality]}</span></div><p>心情 <b>{Math.round(selected.mood)}</b></p><div className="manager-stats"><span>体力<b>{selected.stamina}</b></span><span>效率<b>{selected.efficiency}</b></span><span>精力<b>{selected.spirit}</b></span></div><small>点击人物列表可追踪其当前位置</small></div>}</>}
+    {selected && (isForeman(selected) ? <div className="manager-detail manager-foreman-detail"><img src="/foreman.png" alt="戴金色安全帽的包工头" draggable={false} /><div><strong>包工头</strong><span>守护工人</span></div><p>一直精神饱满，守护所在的地块。</p><div className="foreman-traits"><span>不消耗心情</span><span>占用一个工位</span></div><small>拖动他，为另一块地带去金色光芒。</small></div> : <div className="manager-detail"><div><strong>{selected.name}</strong><span>{PERSONALITY_NAMES[selected.personality]}</span></div><p>心情 <b>{Math.round(selected.mood)}</b></p><div className="manager-stats"><span>体力<b>{selected.stamina}</b></span><span>效率<b>{selected.efficiency}</b></span><span>精力<b>{selected.spirit}</b></span></div><small>点击人物列表可追踪其当前位置</small></div>)}</>}
     </section>
     {showRobots && <section className={`manager-section robot-section ${robotsOpen ? "is-open" : ""}`}>
       <div className="manager-head"><strong>机器人管理</strong><span>{robots.length}台</span><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>

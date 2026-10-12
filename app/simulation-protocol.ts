@@ -17,6 +17,7 @@ export type SimulationStepRequest = {
   id: number;
   state: GameState;
   seconds: number;
+  measurePerformance?: boolean;
 };
 
 export type SimulationStepResponse = {
@@ -24,6 +25,7 @@ export type SimulationStepResponse = {
   id: number;
   state: GameState;
   seconds: number;
+  simulationMs?: number;
 };
 
 export function simulateElapsed(
