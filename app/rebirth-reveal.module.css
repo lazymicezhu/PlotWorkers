@@ -115,28 +115,8 @@
 .sparkleOne { top: 58px; left: 14%; }
 .sparkleTwo { top: 151px; right: 10%; font-size: 19px; color: #d9c190; }
 
-.artworkCaption {
-  margin: 11px 0 0;
-  color: #a29374;
-  font-size: 12px;
-  letter-spacing: .06em;
-}
-
-.details { padding: 36px 34px 26px; }
-
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 0 21px;
-  color: #7d927a;
-  font-size: 11px;
-  letter-spacing: .1em;
-}
-
-.eyebrow > span { width: 5px; height: 5px; border-radius: 50%; background: #83a07a; }
-.role { color: #af8a42; font-size: 12px; letter-spacing: .12em; }
-.details h2 { margin: 7px 0 13px; color: #43533e; font-size: 43px; line-height: 1.15; letter-spacing: .05em; }
+.details { display: flex; flex-direction: column; justify-content: center; padding: 36px 34px 26px; }
+.details h2 { margin: 26px 0 13px; color: #43533e; font-size: 43px; line-height: 1.15; letter-spacing: .05em; }
 .description { margin: 0; color: #8b7246; font-size: 13px; line-height: 1.9; }
 
 .benefits {
@@ -152,9 +132,8 @@
 .benefits dt { display: flex; align-items: center; gap: 7px; color: #78816e; font-size: 12px; }
 .benefits dt > span { display: inline-grid; place-items: center; width: 20px; color: #a98b4a; font-size: 19px; line-height: 1; }
 .benefits dd { margin: 0; color: #576b4d; font-size: 13px; font-weight: 700; }
-.traits { display: flex; gap: 7px; flex-wrap: wrap; }
+.traits { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 28px; }
 .traits > span { padding: 5px 9px; border-radius: 5px; color: #8f7947; background: #f6f0df; font-size: 11px; }
-.placement { margin: 12px 0 25px; color: #949987; font-size: 11px; line-height: 1.7; }
 
 .continueButton {
   display: flex;
@@ -189,11 +168,8 @@
   .character { width: 260px; height: 260px; }
   .orbit { width: 205px; height: 205px; top: 22px; left: calc(50% - 102.5px); }
   .ground { bottom: 2px; width: 185px; height: 43px; }
-  .artworkCaption { margin-top: 5px; font-size: 10px; }
   .details { padding: 25px 26px 23px; }
-  .eyebrow { margin-bottom: 15px; }
   .details h2 { font-size: 35px; }
-  .placement { margin-bottom: 20px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

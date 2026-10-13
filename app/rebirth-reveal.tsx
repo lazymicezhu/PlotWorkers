@@ -30,7 +30,7 @@ export function RebirthReveal({ onContinue, error }: { onContinue: () => void; e
     >
       <div className={styles.content}>
         <div className={styles.artwork} aria-hidden="true">
-          <span className={styles.firstReward}>首次转生 · 专属伙伴</span>
+          <span className={styles.firstReward}>首次转生 · 永久伙伴</span>
           <div className={styles.stage}>
             <span className={styles.halo} />
             <span className={styles.orbit} />
@@ -39,12 +39,9 @@ export function RebirthReveal({ onContinue, error }: { onContinue: () => void; e
             <span className={styles.sparkleTwo}>✧</span>
             <div className={styles.character}><ForemanSprite commanding loop /></div>
           </div>
-          <p className={styles.artworkCaption}>金色安全帽，新的好开端。</p>
         </div>
 
         <section className={styles.details}>
-          <p className={styles.eyebrow}><span /> 首次转生 · 专属奖励</p>
-          <span className={styles.role}>特殊守护工人</span>
           <h2 id="rebirth-reward-title">包工头</h2>
           <p id="rebirth-reward-description" className={styles.description}><ForemanDescription /></p>
 
@@ -53,7 +50,6 @@ export function RebirthReveal({ onContinue, error }: { onContinue: () => void; e
             <div><dt><span aria-hidden="true">♡</span> 驻守生活区</dt><dd>心情恢复速度翻倍</dd></div>
           </dl>
           <div className={styles.traits}><span>不消耗心情</span><span>占 1 个工位</span></div>
-          <p className={styles.placement}>可拖到任意地块，调配到最需要他的地方。</p>
 
           {error && <p id="rebirth-save-error" className={styles.error} role="alert">{error}</p>}
           <button ref={continueRef} className={styles.continueButton} onClick={onContinue}>{error ? "重试并开启新工坊" : "带上包工头，开启新工坊"}<span aria-hidden="true">→</span></button>
