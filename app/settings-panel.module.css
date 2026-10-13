@@ -1,0 +1,55 @@
+.dialog {
+  --panel-height: 600px;
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(440px, calc(100vw - 24px));
+  height: min(var(--panel-height), calc(100dvh - 24px));
+  max-width: none;
+  max-height: none;
+  padding: 24px 28px 20px;
+  overflow: hidden;
+  border: 1px solid #e9ede7;
+  border-radius: 20px;
+  background: #fff;
+  color: #354439;
+  box-shadow: 0 16px 50px #29372c20;
+  font: 14px/1.6 Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  cursor: default;
+  touch-action: auto;
+  user-select: text;
+}
+
+.dialog[open] { display: grid; grid-template-rows: 44px minmax(0, 1fr) 44px 32px; row-gap: 12px; }
+.head { display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px; align-items: center; gap: 9px; height: 44px; }
+.head > * { grid-row: 1; }
+.head h2 { grid-column: 2; margin: 0; font-size: 21px; line-height: 1.4; font-weight: 500; }
+.back { grid-column: 1; }
+.close { grid-column: 3; }
+.icon { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #7b877d; font: 22px/1 Arial, sans-serif; cursor: pointer; }
+.icon:hover { background: #f6f8f4; }
+.body { min-width: 0; min-height: 0; padding-top: 13px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scrollbar-width: thin; overscroll-behavior: contain; }
+.actions { display: flex; gap: 10px; min-width: 0; height: 44px; }
+.feedback { min-width: 0; height: 32px; overflow: auto; color: #526f49; font-size: 12px; line-height: 16px; scrollbar-width: thin; }
+.feedback p { margin: 0; overflow-wrap: anywhere; }
+.error { color: #a65950; }
+.button { display: inline-flex; flex: 1; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 44px; padding: 9px 16px; border: 1px solid #e9ede7; border-radius: 9px; background: #fff; color: #354439; font: inherit; text-align: center; cursor: pointer; }
+.actions .button { height: 44px; }
+.button:hover { background: #f6f8f4; }
+.button.primary { border-color: transparent; background: #edf2e9; color: #526f49; }
+.button.solid { border-color: transparent; background: #5c7752; color: #fff; }
+.button.solid:hover { background: #506948; }
+.button.danger { border-color: transparent; background: #a65950; color: #fff; }
+.button.danger:hover { background: #954d45; }
+.button:disabled { border-color: transparent; background: #f6f8f4; color: #7b877d; cursor: not-allowed; }
+.dialog button:focus-visible, .dialog input:focus-visible { outline: 2px solid #527454; outline-offset: 3px; }
+
+@media (max-width: 480px) {
+  .dialog { --panel-height: 648px; padding: 22px 18px 18px; }
+  .actions .button { padding: 7px 10px; font-size: 13px; }
+}
+
+@media (pointer: coarse) {
+  .head { grid-template-columns: 44px minmax(0, 1fr) 44px; }
+  .icon { width: 44px; height: 44px; }
+}
