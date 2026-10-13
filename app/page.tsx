@@ -88,6 +88,7 @@ import { canFirstRebirth } from "./rebirth";
 import { saveFirstRebirth } from "./rebirth-save";
 import { RebirthReveal } from "./rebirth-reveal";
 import { RebirthTransition, rebirthTransitionStyles } from "./rebirth-transition";
+import { ResourceHud } from "./resource-hud";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -1418,18 +1419,7 @@ export default function PlotWorkersGame() {
       onLostPointerCapture={finishPan}
       tabIndex={0}
     >
-      <header className="hud" onPointerDown={(event) => event.stopPropagation()}>
-        <div className="hud-resources">
-          <div className="brand-chip">Plot Workers</div>
-          <Resource label="金币" value={game.coins} accent />
-          <Resource label="原料" value={game.inventory.raw} warning={game.inventory.raw <= 0} />
-          <Resource label="罐头" value={game.inventory.cans} warning={game.inventory.cans < 20} />
-          <Resource label="粗制/精制" value={`${format(game.inventory.rough)}/${format(game.inventory.refined)}`} />
-          <Resource label="螺丝/钢筋" value={`${format(game.inventory.screws)}/${format(game.inventory.rebar)}`} />
-          {game.schedulerBots > 0 && <Resource label="机器人时间/数量" value={`${Math.ceil(game.schedulerSeconds)}s/${game.schedulerBots}台`} warning={game.schedulerSeconds < 60} />}
-        </div>
-        <button className="settings-button" aria-label="设置与存档" title="设置与存档" aria-haspopup="dialog" onClick={() => setSettingsOpen(true)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-.5 2a7 7 0 0 0-1.8 1l-2-.6-2 3.5 1.5 1.5a7 7 0 0 0 0 3.2l-1.5 1.5 2 3.5 2-.6a7 7 0 0 0 1.8 1l.5 2h4l.5-2a7 7 0 0 0 1.8-1l2 .6 2-3.5-1.5-1.5a7 7 0 0 0 0-3.2l1.5-1.5-2-3.5-2 .6a7 7 0 0 0-1.8-1L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
-      </header>
+      <ResourceHud key={`hud-${worldRevision}`} game={game} onSettings={() => setSettingsOpen(true)} />
       {settingsOpen && <SettingsDialog game={game} onClose={() => setSettingsOpen(false)} onImport={importSave} onReset={resetGame} performanceEnabled={performanceEnabled} onPerformanceChange={(enabled) => { setPerformanceEnabled(enabled); localStorage.setItem(PERFORMANCE_KEY, String(enabled)); }} rebirth={{ completed: game.rebirthCount > 0, onRebirth: beginRebirth }} />}
       {rebirthStage === "dissolving" && <RebirthTransition onComplete={finishRebirthTransition} />}
       {rebirthStage === "reward" && <RebirthReveal onContinue={continueRebirth} error={rebirthError} />}
@@ -1526,10 +1516,6 @@ export default function PlotWorkersGame() {
       {notice && <div className={`notice ${plotDraft ? "is-above-recycle" : ""}`}>{notice}</div>}
     </main>
   );
-}
-
-function Resource({ label, value, accent = false, warning = false }: { label: string; value: number | string; accent?: boolean; warning?: boolean }) {
-  return <div className={`resource ${accent ? "is-accent" : ""} ${warning ? "is-warning" : ""}`}><span>{label}</span><strong>{typeof value === "number" ? format(value) : value}</strong></div>;
 }
 
 const WORKER_ROW_HEIGHT = 52;
