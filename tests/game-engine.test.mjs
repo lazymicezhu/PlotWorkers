@@ -570,6 +570,119 @@ test("disabled plots pause production and are ignored by automatic dispatch", ()
   assert.notEqual(chooseAutoDispatch(ready, [], [], { rest: false, work: true, wake: false })?.targetId, "gather");
 });
 
+test("evacuation outranks rest, wake and work even when the ordinary worker comes first", () => {
+  for (const [status, zoneId, mood] of [["exhausted", "process", 0], ["slacking", "process", 80], ["ready", "living", 100]]) {
+    const game = state();
+    const base = game.workers[0];
+    game.plots.find((plot) => plot.id === "gather").enabled = false;
+    game.workers = [
+      { ...base, id: "ordinary", status, zoneId, mood },
+      { ...base, id: "evacuee", status: "gathering", zoneId: "gather", mood: 80 },
+    ];
+    assert.deepEqual(chooseAutoDispatch(game), { workerId: "evacuee", targetId: "process", action: "evacuate" });
+  }
+});
+
+test("evacuation overrides robot duty switches and survives the disabled plot idle state", () => {
+  for (const mood of [0, 75]) {
+    let game = state();
+    game.workers[0] = { ...game.workers[0], zoneId: "gather", mood, status: mood === 0 ? "exhausted" : "gathering" };
+    game = stepGame(togglePlotEnabled(game, "gather"), 1, () => 1);
+    assert.equal(game.workers[0].status, "idle");
+    assert.deepEqual(chooseAutoDispatch(game, [], [], { rest: false, work: false, wake: false }), {
+      workerId: game.workers[0].id, targetId: mood === 0 ? "living" : "process", action: "evacuate",
+    });
+  }
+});
+
+test("disabled living plots move recovering workers to living space and ready workers to work", () => {
+  for (const mood of [0, 50, 100]) {
+    let game = state();
+    game.plots.push({ ...game.plots.find((plot) => plot.id === "living"), id: "living-2" });
+    game.workers[0].mood = mood;
+    game = stepGame(togglePlotEnabled(game, "living"), 1, () => 1);
+    assert.deepEqual(chooseAutoDispatch(game), {
+      workerId: game.workers[0].id, targetId: mood < 100 ? "living-2" : "gather", action: "evacuate",
+    });
+  }
+});
+
+test("productive evacuees prefer a plot of the same type even when other work plots are emptier", () => {
+  for (const type of ["gather", "process", "synthesis"]) {
+    const game = state();
+    const base = game.workers[0];
+    game.plots.push({ ...game.plots[0], id: "disabled-source", type, enabled: false });
+    game.plots.push({ ...game.plots[0], id: "same-type", type, cols: 4, rows: 4 });
+    for (const plot of game.plots) if (plot.type === type && plot.id !== "same-type") plot.enabled = false;
+    game.workers = [
+      { ...base, id: "evacuee", zoneId: "disabled-source", status: "idle", mood: 80 },
+      { ...base, id: "resident", zoneId: "same-type", status: "idle" },
+    ];
+    assert.deepEqual(chooseAutoDispatch(game), { workerId: "evacuee", targetId: "same-type", action: "evacuate" });
+  }
+});
+
+test("evacuation balances other work plots when matching plots have no unreserved slot", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.plots.find((plot) => plot.id === "gather").enabled = false;
+  game.plots.push({ ...game.plots[0], id: "gather-2", cols: 4, rows: 4, enabled: true });
+  game.plots.push({ ...game.plots[1], id: "process-2" });
+  game.workers = [
+    { ...base, id: "evacuee", zoneId: "gather", status: "idle" },
+    ...Array.from({ length: 3 }, (_, index) => ({ ...base, id: `gather-${index}`, zoneId: "gather-2", status: "idle" })),
+    { ...base, id: "processor", zoneId: "process", status: "idle" },
+  ];
+  assert.deepEqual(chooseAutoDispatch(game, [], ["gather-2"]), { workerId: "evacuee", targetId: "process-2", action: "evacuate" });
+});
+
+test("evacuation falls back to available space when the preferred destination is unavailable", () => {
+  const resting = state();
+  resting.plots.find((plot) => plot.id === "living").enabled = false;
+  resting.workers[0].mood = 40;
+  assert.deepEqual(chooseAutoDispatch(resting), { workerId: resting.workers[0].id, targetId: "gather", action: "evacuate" });
+
+  const working = state();
+  for (const plot of working.plots) if (plot.type !== "living") plot.enabled = false;
+  working.workers[0] = { ...working.workers[0], zoneId: "gather", status: "idle", mood: 80 };
+  assert.deepEqual(chooseAutoDispatch(working), { workerId: working.workers[0].id, targetId: "living", action: "evacuate" });
+});
+
+test("evacuation waits when all other plots are disabled, full or reserved and never wakes in place", () => {
+  const game = state();
+  for (const plot of game.plots) plot.enabled = false;
+  game.workers[0] = { ...game.workers[0], zoneId: "gather", status: "slacking" };
+  assert.equal(chooseAutoDispatch(game), null);
+
+  const living = game.plots.find((plot) => plot.id === "living");
+  living.enabled = true;
+  game.workers.push(...Array.from({ length: 3 }, (_, index) => ({ ...game.workers[0], id: `rest-${index}`, zoneId: "living", mood: 0, status: "resting" })));
+  assert.equal(chooseAutoDispatch(game, [], ["living"]), null);
+  game.workers.push({ ...game.workers[1], id: "rest-final" });
+  assert.equal(chooseAutoDispatch(game), null);
+});
+
+test("evacuation skips workers already assigned to robots or being dragged", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.plots.find((plot) => plot.id === "gather").enabled = false;
+  game.workers = [
+    { ...base, id: "assigned", zoneId: "gather", status: "idle" },
+    { ...base, id: "held", zoneId: "gather", status: "dragging" },
+    { ...base, id: "available", zoneId: "gather", status: "idle" },
+  ];
+  assert.deepEqual(chooseAutoDispatch(game, ["assigned"]), { workerId: "available", targetId: "process", action: "evacuate" });
+  assert.equal(chooseAutoDispatch(game, ["assigned", "available"]), null);
+});
+
+test("foremen evacuate disabled plots but keep their manual placement on enabled plots", () => {
+  const game = state();
+  game.workers[0] = { ...game.workers[0], role: "foreman", zoneId: "gather", status: "slacking" };
+  assert.equal(chooseAutoDispatch(game), null);
+  game.plots.find((plot) => plot.id === "gather").enabled = false;
+  assert.deepEqual(chooseAutoDispatch(game), { workerId: game.workers[0].id, targetId: "process", action: "evacuate" });
+});
+
 test("holy light is placed from inventory and doubles production without mood drain", () => {
   const game = state();
   game.inventory.specials.holyLight = 1;
@@ -611,6 +724,69 @@ test("selling screws individually or with all products pays the same fixed price
   assert.equal(sellProducts(screwsOnly, "all").coins, all.coins);
   assert.deepEqual([all.inventory.rough, all.inventory.refined, all.inventory.screws, all.inventory.rebar], [0, 0, 0, 0]);
   assert.equal(all.inventory.cans, game.inventory.cans);
+});
+
+test("partial sales remove only the selected product amount and use its current price", () => {
+  const game = state();
+  game.market.roughPrice = 9;
+  game.market.refinedPrice = 34;
+  Object.assign(game.inventory, { rough: 8, refined: 9, screws: 10, rebar: 11 });
+  const original = structuredClone(game);
+  for (const [kind, price] of [["rough", 9], ["refined", 34], ["screws", 30], ["rebar", 50]]) {
+    const sold = sellProducts(game, kind, 3);
+    assert.equal(sold.coins - game.coins, 3 * price);
+    assert.deepEqual(sold.inventory, { ...game.inventory, [kind]: game.inventory[kind] - 3 });
+  }
+  assert.deepEqual(game, original);
+});
+
+test("partial sales ignore invalid or empty quantities without changing state", () => {
+  const game = state();
+  Object.assign(game.inventory, { rough: 8, refined: 9, screws: 10, rebar: 11 });
+  for (const kind of ["rough", "refined", "screws", "rebar"]) {
+    for (const amount of [0, -1, -.5, .9, NaN, Infinity, -Infinity]) {
+      assert.equal(sellProducts(game, kind, amount), game, `${kind}: ${amount}`);
+    }
+    const empty = { ...game, inventory: { ...game.inventory, [kind]: 0 } };
+    assert.equal(sellProducts(empty, kind, 2), empty);
+  }
+});
+
+test("partial sales floor fractional quantities and clamp sales to available inventory", () => {
+  const game = state();
+  Object.assign(game.inventory, { rough: 8, refined: 9, screws: 10, rebar: 11 });
+  for (const [kind, price] of [["rough", 10], ["refined", 30], ["screws", 30], ["rebar", 50]]) {
+    const fractional = sellProducts(game, kind, 2.8);
+    assert.equal(fractional.coins - game.coins, 2 * price);
+    assert.equal(fractional.inventory[kind], game.inventory[kind] - 2);
+    assert.deepEqual(sellProducts(game, kind, 1000), sellProducts(game, kind));
+  }
+});
+
+test("selling all remains compatible when an optional quantity is passed", () => {
+  const game = state();
+  Object.assign(game.inventory, { rough: 8, refined: 9, screws: 10, rebar: 11 });
+  const all = sellProducts(game, "all");
+  for (const amount of [0, 1, 5, NaN, Infinity]) {
+    assert.deepEqual(sellProducts(game, "all", amount), all);
+  }
+  assert.deepEqual([all.inventory.rough, all.inventory.refined, all.inventory.screws, all.inventory.rebar], [0, 0, 0, 0]);
+  assert.equal(all.coins - game.coins, 1200);
+});
+
+test("partial sales leave active production batches and reserved ingredients unchanged", () => {
+  const game = state();
+  Object.assign(game.inventory, { rough: 8, refined: 9, screws: 10, rebar: 11 });
+  game.processPlots.process.batch = { active: true, progress: .5, reservedRaw: 75 };
+  game.synthesisPlots.synth = { recipe: "rebar", produced: 0, batch: { active: true, progress: .4, reserved: { rough: 10, refined: 5, screws: 2 } } };
+  const original = structuredClone(game);
+  for (const kind of ["rough", "refined", "screws", "rebar"]) {
+    const sold = sellProducts(game, kind, 3);
+    assert.deepEqual(sold.processPlots, original.processPlots);
+    assert.deepEqual(sold.synthesisPlots, original.synthesisPlots);
+    assert.equal(sold.inventory.raw, original.inventory.raw);
+    assert.equal(sold.inventory[kind], original.inventory[kind] - 3);
+  }
 });
 
 test("saleable synthesis batches are worth more than their inputs even at peak market prices", () => {

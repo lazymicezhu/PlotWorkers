@@ -110,6 +110,105 @@ test("robots with no work retry separately after 600 to 1000 milliseconds", () =
   assert.equal(h.maxTimers, 1);
 });
 
+test("urgent work bypasses initial delays and cooldowns without interrupting busy robots", () => {
+  const h = harness({ randomValues: [0, .01, 1, 1, .5] });
+  h.scheduler.sync(4, true);
+  h.advanceTo(100);
+  h.scheduler.complete(0);
+  h.advanceTo(200);
+  h.scheduler.setUrgent(true);
+  assert.equal(h.nextAt, 200);
+  h.advanceTo(208);
+  assert.deepEqual(h.dispatches, [
+    { index: 0, at: 0 },
+    { index: 1, at: 30 },
+    { index: 0, at: 200 },
+    { index: 2, at: 204 },
+    { index: 3, at: 208 },
+  ]);
+  assert.equal(h.randomCalls, 5, "urgent dispatches need no random delays");
+  assert.equal(h.timers.size, 0, "busy robots remain busy until their jobs finish");
+  assert.equal(h.maxTimers, 1);
+});
+
+test("urgent robots take another job immediately after completion or release", () => {
+  const h = harness();
+  h.scheduler.setUrgent(true);
+  h.scheduler.sync(2, true);
+  h.advanceTo(10);
+  h.scheduler.complete(0);
+  assert.equal(h.nextAt, 10);
+  h.advanceTo(11);
+  h.scheduler.release(1);
+  assert.equal(h.nextAt, 14, "immediate dispatches retain overdue smoothing");
+  h.advanceTo(14);
+  assert.deepEqual(h.dispatches, [
+    { index: 0, at: 0 },
+    { index: 1, at: 4 },
+    { index: 0, at: 10 },
+    { index: 1, at: 14 },
+  ]);
+  h.scheduler.setUrgent(false);
+  h.scheduler.complete(0);
+  assert.equal(h.nextAt, 3014, "normal cooldown resumes when urgency ends");
+  h.scheduler.release(1);
+  assert.equal(h.nextAt, 814, "normal release retry resumes when urgency ends");
+  assert.equal(h.maxTimers, 1);
+});
+
+test("urgent robots with no available job still back off before retrying", () => {
+  const h = harness({ startsJob: false, randomValues: [0, 1] });
+  h.scheduler.setUrgent(true);
+  h.scheduler.sync(1, true);
+  h.advanceTo(0);
+  assert.equal(h.nextAt, 600);
+  h.advanceTo(100);
+  h.scheduler.setUrgent(true);
+  assert.equal(h.nextAt, 600, "repeated urgency updates preserve the retry delay");
+  h.advanceTo(600);
+  assert.equal(h.nextAt, 1600);
+  h.advanceTo(1600);
+  assert.equal(h.nextAt, 2400);
+  assert.equal(h.maxTimers, 1);
+});
+
+test("urgent resume and newly added robots are available immediately", () => {
+  const h = harness();
+  h.scheduler.sync(2, false);
+  h.scheduler.setUrgent(true);
+  assert.equal(h.timers.size, 0, "urgency does not unpause the service");
+  h.advanceTo(100);
+  h.scheduler.sync(2, true);
+  h.advanceTo(104);
+  h.scheduler.sync(2, false);
+  h.scheduler.complete(0);
+  h.advanceTo(200);
+  h.scheduler.sync(2, true);
+  h.advanceTo(200);
+  h.scheduler.sync(3, true);
+  h.advanceTo(204);
+  assert.deepEqual(h.dispatches, [
+    { index: 0, at: 100 },
+    { index: 1, at: 104 },
+    { index: 0, at: 200 },
+    { index: 2, at: 204 },
+  ]);
+  assert.equal(h.randomCalls, 0);
+  assert.equal(h.maxTimers, 1);
+});
+
+test("reset clears urgency so a new game uses normal initial delays", () => {
+  const h = harness();
+  h.scheduler.setUrgent(true);
+  h.scheduler.sync(1, true);
+  h.advanceTo(0);
+  h.scheduler.reset();
+  h.scheduler.sync(1, true);
+  assert.equal(h.nextAt, 1500);
+  h.advanceTo(1500);
+  assert.deepEqual(h.dispatches, [{ index: 0, at: 0 }, { index: 0, at: 1500 }]);
+});
+
 test("pause cancels polling and resume spreads idle robots without touching busy jobs", () => {
   const h = harness({ randomValues: [0, .1, .2, .3, .4] });
   h.scheduler.sync(3, true);

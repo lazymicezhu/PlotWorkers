@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   GameState,
   INITIAL_PLOTS,
@@ -51,7 +52,6 @@ import {
   guardedPlotIds,
   isForeman,
   nextPlotPrice,
-  orderCoinReward,
   parseSavedState,
   placeHolyLight,
   recyclePlot,
@@ -91,6 +91,10 @@ import { RebirthReveal } from "./rebirth-reveal";
 import { RebirthTransition, rebirthTransitionStyles } from "./rebirth-transition";
 import { ResourceHud } from "./resource-hud";
 import { createGameView, updateGameView } from "./resource-activity";
+import { WorkshopTablet, type TabletPage } from "./workshop-tablet";
+import { TabletIcon } from "./tablet-icon";
+import { WorkshopOrders } from "./workshop-orders";
+import { snapshotTabletNotifications, reconcileTabletNotifications, type TabletNotificationSnapshot } from "./tablet-notifications";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -131,7 +135,7 @@ type AutoTransfer = {
   landing?: boolean;
   token: number;
   durationMs: number;
-  action: "rest" | "work" | "wake";
+  action: "rest" | "work" | "wake" | "evacuate";
 };
 
 type PendingSimulation = {
@@ -289,7 +293,7 @@ function validPlotPosition(candidate: PlotState, plots: PlotState[], excludeId?:
 }
 
 function statusAfterDrop(worker: WorkerState, plot: PlotState | null) {
-  if (!plot) return "idle" as const;
+  if (!plot || plot.enabled === false) return "idle" as const;
   if (plot.type === "living") return worker.mood >= 100 ? "ready" as const : "resting" as const;
   return worker.mood <= 0 ? "exhausted" as const : "idle" as const;
 }
@@ -344,9 +348,13 @@ export default function PlotWorkersGame() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>("worker-1");
   const [trackedId, setTrackedId] = useState<string | null>(null);
-  const [activeManager, setActiveManager] = useState<"workers" | "robots" | "plots" | null>("workers");
+  const [tabletOpen, setTabletOpen] = useState(false);
+  const [tabletPage, setTabletPage] = useState<TabletPage>("shop");
+  const [tabletUnread, setTabletUnread] = useState<Partial<Record<TabletPage, boolean>>>({});
+  const [tabletNotificationVersion, setTabletNotificationVersion] = useState(0);
+  const tabletNotificationRef = useRef<TabletNotificationSnapshot | null>(null);
   const [panning, setPanning] = useState(false);
-  const [panel, setPanel] = useState<Panel>(null);
+  const [panel, setPanel] = useState<Panel>("shop");
   const [selectedProcessPlotId, setSelectedProcessPlotId] = useState<ZoneId>("process");
   const [selectedSynthesisPlotId, setSelectedSynthesisPlotId] = useState<ZoneId>("");
   const [placingHoly, setPlacingHoly] = useState(false);
@@ -480,6 +488,22 @@ export default function PlotWorkersGame() {
   useLayoutEffect(() => { gameRef.current = game; }, [game]);
 
   useEffect(() => {
+    const previous = tabletNotificationRef.current;
+    if (!previous) {
+      tabletNotificationRef.current = snapshotTabletNotifications(game);
+      return;
+    }
+    const result = reconcileTabletNotifications(previous, game);
+    tabletNotificationRef.current = result.snapshot;
+    const pages = result.pages.filter((page) => !tabletOpen || page !== tabletPage);
+    if (!pages.length) return;
+    // Game events are external to the tablet; collect their unread indicators once.
+    setTabletUnread((current) => ({ ...current, ...Object.fromEntries(pages.map((page) => [page, true])) }));
+    setTabletNotificationVersion((version) => version + 1);
+  }, [game, tabletOpen, tabletPage]);
+
+
+  useEffect(() => {
     if (typeof Worker === "undefined") return;
     let worker: Worker;
     try {
@@ -519,6 +543,7 @@ export default function PlotWorkersGame() {
     const saved = parseSavedState(localStorage.getItem(SAVE_KEY));
     if (saved) {
       gameRef.current = saved;
+      tabletNotificationRef.current = snapshotTabletNotifications(saved);
       // Restore browser-only state after hydration; synchronous restoration is intentional.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setGameView(createGameView(saved));
@@ -547,7 +572,7 @@ export default function PlotWorkersGame() {
       const isPinch = event.ctrlKey;
       if (rebirthPausedRef.current || event.defaultPrevented || deltaY === 0 || !(event.target instanceof Element)) return;
       // Native bubbling reaches this listener before React's panel handlers.
-      if (event.target.closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog")) return;
+      if (event.target.closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
       // Keep pinching when scene objects move under the gesture's anchor.
       if (!isPinch && event.target.closest(".plot, .walker")) return;
       if (event.cancelable) event.preventDefault();
@@ -735,6 +760,13 @@ export default function PlotWorkersGame() {
     robotSchedulerRef.current?.sync(game.schedulerBots, schedulerActive && document.visibilityState === "visible");
   }, [game.schedulerBots, schedulerActive, worldRevision]);
 
+  const disabledPlotIds = useMemo(() => new Set(game.plots.filter((plot) => plot.enabled === false).map((plot) => plot.id)), [game.plots]);
+  const evacuationPending = game.workers.some((worker) => worker.zoneId && disabledPlotIds.has(worker.zoneId)
+    && (worker.status !== "dragging" || autoTransferByWorker.has(worker.id)));
+  useEffect(() => {
+    robotSchedulerRef.current?.setUrgent(evacuationPending);
+  }, [evacuationPending, worldRevision]);
+
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(""), 2200);
@@ -773,6 +805,19 @@ export default function PlotWorkersGame() {
     });
   }
 
+  function deliverTabletOrder(orderId: string) {
+    // Read the latest committed simulation before choosing a random order reward.
+    // The transaction stays outside React updaters, which may be replayed.
+    flushSync(() => {});
+    const current = gameRef.current;
+    const next = submitOrder(current, orderId);
+    if (next === current) return false;
+    gameRef.current = next;
+    flushSync(() => setGame(next));
+    persistGame(next);
+    return true;
+  }
+
   function positionInWorld(clientX: number, clientY: number) {
     const rect = worldRef.current!.getBoundingClientRect();
     return { x: (clientX - rect.left) / rect.width * WORLD_W, y: (clientY - rect.top) / rect.height * WORLD_H };
@@ -805,7 +850,7 @@ export default function PlotWorkersGame() {
     if (rebirthPausedRef.current) return;
     if (placingHoly) { onPanDown(event); return; }
     if (placingPlotRef.current || plotDraftRef.current || draggingIdRef.current || event.button !== 0 || event.isPrimary === false) return;
-    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, input, select")) return;
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet], input, select")) return;
     const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
     const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
     if (id) onWorkerDown(event, id);
@@ -814,7 +859,7 @@ export default function PlotWorkersGame() {
   function onScenePointerMoveCapture(event: PointerEvent<HTMLElement>) {
     if (placingHoly) { onPanMove(event); return; }
     if (rebirthPausedRef.current || draggingIdRef.current || panPointerRef.current !== null || placingPlotRef.current || plotDraftRef.current || event.buttons !== 0 || event.pointerType === "touch") return;
-    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, input, select")) { clearWorkerHover(); return; }
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet], input, select")) { clearWorkerHover(); return; }
     const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
     const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
     if (!id) { if (!domWorker) clearWorkerHover(); return; }
@@ -832,6 +877,7 @@ export default function PlotWorkersGame() {
     const point = renderedWorkerPosition(id) ?? (sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y });
     suppressWorkerClickRef.current = true;
     finishPan(); finishForemanCycle(id); clearWorkerHover();
+    setTabletOpen(false);
     if (interruptedTransfer) {
       autoTransferControllersRef.current.get(id)?.cancel();
       autoTransferControllersRef.current.delete(id);
@@ -967,6 +1013,7 @@ export default function PlotWorkersGame() {
     plotDraftRef.current = draft;
     setPlotDraft(draft);
     setPanel(null);
+    setTabletOpen(false);
     setNotice("拖动地块调整位置，松开完成摆放");
   }
 
@@ -1042,6 +1089,7 @@ export default function PlotWorkersGame() {
     const placement = { plot, valid: validPlotPosition(plot, game.plots) };
     placingPlotRef.current = placement;
     setPlacingPlot(placement);
+    setTabletOpen(false);
     setPanel(null);
     setNotice("移动鼠标选择位置，单击空白处完成购买");
   }
@@ -1086,6 +1134,30 @@ export default function PlotWorkersGame() {
     setAutoTransfers(next);
   }
 
+  function toggleManagedPlot(plotId: ZoneId) {
+    const disabling = gameRef.current.plots.find((plot) => plot.id === plotId)?.enabled !== false;
+    const cancelled = disabling ? autoTransfersRef.current.filter((transfer) => transfer.targetId === plotId) : [];
+    const cancelledIds = new Set(cancelled.map((transfer) => transfer.workerId));
+    for (const transfer of cancelled) {
+      const visible = renderedWorkerPosition(transfer.workerId);
+      if (visible) setCanvasWorkerHandoff(worldRef.current, transfer.workerId, visible);
+      autoTransferControllersRef.current.get(transfer.workerId)?.cancel();
+      autoTransferControllersRef.current.delete(transfer.workerId);
+    }
+    // Commit restored occupants before releasing reservations and immediately reusing robots.
+    flushSync(() => updateGame((current) => {
+      const next = togglePlotEnabled(current, plotId);
+      if (!cancelledIds.size) return next;
+      return { ...next, workers: next.workers.map((worker) => cancelledIds.has(worker.id)
+        ? { ...worker, status: statusAfterDrop(worker, next.plots.find((plot) => plot.id === worker.zoneId) ?? null), duration: 500 }
+        : worker) };
+    }));
+    if (cancelled.length) {
+      replaceAutoTransfers((transfers) => transfers.filter((transfer) => !cancelledIds.has(transfer.workerId)));
+      for (const transfer of cancelled) robotSchedulerRef.current?.release(transfer.botIndex);
+    }
+  }
+
   function startAutoDispatch(botIndex: number) {
     if (rebirthPausedRef.current) return false;
     const current = gameRef.current;
@@ -1109,6 +1181,7 @@ export default function PlotWorkersGame() {
     const epoch = simulationEpochRef.current;
     const sourcePlot = current.plots.find((plot) => plot.id === worker.zoneId);
     const from = renderedWorkerPosition(worker.id) ?? (sourcePlot ? project(sourcePlot, worker.u, worker.v) : { x: worker.x, y: worker.y });
+    if (isForeman(worker)) finishForemanCycle(worker.id);
     if (hoveredWorkerRef.current === worker.id) clearWorkerHover();
     const waking = decision!.action === "wake";
     const atSource = workerAtPoint(worker, from, sourcePlot);
@@ -1140,18 +1213,21 @@ export default function PlotWorkersGame() {
         if (!isCurrent()) return;
         const visible = renderedWorkerPosition(worker.id);
         if (visible) setCanvasWorkerHandoff(worldRef.current, worker.id, visible);
-        setGame((state) => {
+        flushSync(() => setGame((state) => {
           if (epoch !== simulationEpochRef.current) return state;
           const destination = state.plots.find((plot) => plot.id === target.id);
           const source = state.plots.find((plot) => plot.id === worker.zoneId);
-          if (!destination) return state;
+          if (!destination || destination.enabled === false) {
+            return { ...state, workers: state.workers.map((item) => item.id === worker.id
+              ? { ...item, status: statusAfterDrop(item, source ?? null), duration: 500 } : item) };
+          }
           return { ...state, workers: state.workers.map((item) => item.id === worker.id ? {
             ...item, zoneId: destination.id, u, v, ...project(destination, u, v),
             status: statusAfterDrop(item, destination), duration: 500,
             lastWorkZoneId: destination.type === "living" ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId) : destination.id,
             continuousWork: 0, slowStacks: 0, lazyElapsed: 0, lazyCheckInterval: undefined,
           } : item) };
-        });
+        }));
         replaceAutoTransfers((transfers) => transfers.filter((value) => value.token !== token));
         robotSchedulerRef.current?.complete(botIndex);
         autoTransferControllersRef.current.delete(worker.id);
@@ -1163,7 +1239,7 @@ export default function PlotWorkersGame() {
 
   function onPanDown(event: PointerEvent<HTMLElement>) {
     if (placingHoly) {
-      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog")) return;
+      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
       event.preventDefault();
       event.stopPropagation();
       const point = positionInWorld(event.clientX, event.clientY);
@@ -1178,7 +1254,7 @@ export default function PlotWorkersGame() {
       placePurchasedPlot(event.clientX, event.clientY);
       return;
     }
-    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog")) return;
+    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
     if (panPointerRef.current !== null) return;
     panPointerRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -1209,9 +1285,22 @@ export default function PlotWorkersGame() {
     setTrackedId(worker.id);
   }
 
-  function toggleManager(section: "workers" | "robots" | "plots") {
-    if (section === "robots" || activeManager === "workers") setTrackedId(null);
-    setActiveManager((current) => current === section ? null : section);
+  function selectTabletPage(page: TabletPage) {
+    setTabletPage(page);
+    setPanel(page === "workers" || page === "robots" || page === "plots" ? null : page);
+    setTabletUnread((current) => current[page] ? { ...current, [page]: false } : current);
+  }
+
+  function changeTabletOpen(open: boolean) {
+    if (open) {
+      finishPan();
+      clearWorkerHover();
+      cancelPurchasedPlot();
+      setPlacingHoly(false);
+      setHolyPreview(null);
+      selectTabletPage(tabletPage);
+    }
+    setTabletOpen(open);
   }
 
   function spend(action: () => GameState, success: string, failure: string) {
@@ -1238,6 +1327,7 @@ export default function PlotWorkersGame() {
   function activateSpecial(id: SpecialItemId) {
     if (game.inventory.specials[id] <= 0) return;
     if (id === "holyLight") {
+      setTabletOpen(false);
       setPanel(null);
       setPlacingHoly(true);
       setHolyPreview(positionInWorld(viewportSize.width / 2, viewportSize.height / 2));
@@ -1280,6 +1370,9 @@ export default function PlotWorkersGame() {
     foremanCommandAtRef.current.clear();
     setCommandingForemen(new Set());
     gameRef.current = next;
+    tabletNotificationRef.current = snapshotTabletNotifications(next);
+    setTabletUnread({});
+    setTabletOpen(false);
     setGameView(createGameView(next));
     setWorldRevision((revision) => revision + 1);
     setSelectedId(next.workers[0]?.id ?? null);
@@ -1336,6 +1429,7 @@ export default function PlotWorkersGame() {
     setTrackedId(null);
     setHoveredPlot(null);
     setPanel(null);
+    setTabletOpen(false);
     setNotice("");
     setPlacingHoly(false);
     setHolyPreview(null);
@@ -1411,10 +1505,47 @@ export default function PlotWorkersGame() {
     return sceneDepth(plot ? project(plot, worker.u, worker.v).y : worker.y);
   });
 
+  const panelContents = <>
+        {panel === "process" && selectedProcessPlot && selectedProcessState && <><h2>{selectedProcessPlot.name}配方</h2><p className="panel-note">这里只统计当前地块。切换配方会退回该地块批次原料，并重置该地块的生产数量。</p>{(["rough", "refined"] as const).map((recipeId) => { const recipe = RECIPES[recipeId]; return <button className={`panel-option ${selectedProcessState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeRecipe(current, selectedProcessPlot.id, recipeId))}><strong>{recipe.name}</strong><span>{recipe.raw} 原料 · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{RECIPES[selectedProcessState.recipe].name}产品</span><strong>{selectedProcessState.produced}件</strong></div></>}
+        {panel === "synthesis" && selectedSynthesisPlot && selectedSynthesisState && <><h2>{selectedSynthesisPlot.name}配方</h2><p className="panel-note">人物共同贡献合成速度。切换配方会退回本批材料并重置本地块产量。</p>{(["cans", "screws", "rebar"] as SynthesisRecipeId[]).map((recipeId) => { const recipe = SYNTHESIS_RECIPES[recipeId]; const materials = Object.entries(recipe.inputs).map(([kind, amount]) => `${kind === "rough" ? "粗制" : kind === "refined" ? "精制" : "螺丝"}${amount}`).join(" + "); return <button className={`panel-option ${selectedSynthesisState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeSynthesisRecipe(current, selectedSynthesisPlot.id, recipeId))}><strong>{recipe.name} ×{recipe.output}</strong><span>{materials} · {recipe.seconds}秒</span></button>; })}<div className="production-summary has-batch-progress" role="progressbar" aria-label={`${selectedSynthesisPlot.name}当前批次合成进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={synthesisPercent} aria-valuetext={`${synthesisStatus}，${synthesisPercent}%；本地块已生产${SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}${selectedSynthesisState.produced}件`} title={`${synthesisStatus} · ${synthesisPercent}%`}>
+          <BatchProgressBackground plotId={selectedSynthesisPlot.id} recipe={selectedSynthesisState.recipe} completed={selectedSynthesisState.produced / SYNTHESIS_RECIPES[selectedSynthesisState.recipe].output} progress={selectedSynthesisState.batch.progress} active={selectedSynthesisState.batch.active} />
+          <span>本地块生产的{SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}</span><strong>{selectedSynthesisState.produced}件</strong>
+        </div></>}
+        {panel === "shop" && <>
+          <h2>生活商店</h2>
+          <div className="tablet-shop-products">
+          {!game.autoCanSupply && <CanPurchaseRow selectedIndex={canPurchaseIndex} coins={game.coins} onChange={setCanPurchaseIndex} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} />}
+          {!game.autoCanSupply && <AutoCanSupplyRow coins={game.coins} onBuy={() => spend(() => buyAutoCanSupply(game), "自动补给罐头已启用", "金币不足")} />}
+          <ShopRow title="随机小人" icon="worker" description="随机属性 · 随机性格" meta={`当前 ${game.workers.length} 人`} price={workerPurchasePrice(game.workers.length)} disabled={game.coins < workerPurchasePrice(game.workers.length)} onClick={buyNewWorker} />
+          {!game.autoSchedulerSupply && <ShopRow title="自动调度服务" icon="robot" description="每次增加 60 秒" meta={`${game.schedulerBots} 台机器人 · 剩余 ${formatClock(game.schedulerSeconds)}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} />}
+          {!game.autoSchedulerSupply && <AutoSchedulerSupplyRow coins={game.coins} onBuy={() => spend(() => buyAutoSchedulerSupply(game), "自动补充调度时间已启用", "金币不足")} />}
+          <ShopRow title="增加调度机器人" icon="robot" description="提升同时调度数量" meta={`当前 ${game.schedulerBots} 台`} price={schedulerBotPrice(game)} disabled={game.coins < schedulerBotPrice(game)} onClick={() => spend(() => buySchedulerBot(game), `已增加第${game.schedulerBots + 1}台调度机器人`, "金币不足")} />
+          <ShopRow title="新地块" icon="plots" description="选择地块类型与大小" meta={`当前 ${game.plots.length} 块`} priceSuffix="起" price={Math.min(...(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => nextPlotPrice(game, type, 4)))} disabled={false} onClick={() => setPanel("plotBuilder")} />
+          </div>
+          <button className="tablet-research-entry" onClick={() => setPanel("research")}><TabletIcon name="factory" size={18} /><span>永久研究</span><TabletIcon name="arrow" size={16} /></button>
+        </>}
+        {panel === "plotBuilder" && <><h2>购买新地块</h2><div className="builder-options">{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => <button key={type} className={builderType === type ? "is-selected" : ""} onClick={() => setBuilderType(type)}>{ZONE_META[type].name}</button>)}</div><div className="builder-options size-options">{([4, 8] as const).map((size) => <button key={size} className={builderSize === size ? "is-selected" : ""} onClick={() => setBuilderSize(size)}>{size}×{size}<small>{nextPlotPrice(game, builderType, size)}金币 · 容纳{size * size / 4}人</small></button>)}</div><button className="primary-action" disabled={game.coins < selectedPlotPrice} onClick={beginPlotPlacement}>购买并选择位置 · {selectedPlotPrice}金币</button>{placingPlot && <button className="cancel-placement" onClick={cancelPurchasedPlot}>取消摆放</button>}</>}
+        {panel === "sell" && <>
+          <h2>出售产品</h2>
+          <div className="market-strip"><span>粗制 {game.market.roughPrice} <b className={game.market.roughPrice >= 10 ? "up" : "down"}>{Math.round((game.market.roughPrice / 10 - 1) * 100)}%</b></span><span>精制 {game.market.refinedPrice} <b className={game.market.refinedPrice >= 30 ? "up" : "down"}>{Math.round((game.market.refinedPrice / 30 - 1) * 100)}%</b></span><strong>{formatClock(marketRemaining)}</strong></div>
+          {([
+            ["rough", "粗加工", game.market.roughPrice],
+            ["refined", "精加工", game.market.refinedPrice],
+            ["screws", "螺丝", SYNTHESIS_SELL_PRICES.screws],
+            ["rebar", "钢筋", SYNTHESIS_SELL_PRICES.rebar],
+          ] as const).map(([kind, name, price]) => <ProductSaleRow key={kind} name={name} stock={game.inventory[kind]} price={price} onSell={(amount) => updateGame((current) => sellProducts(current, kind, amount))} />)}
+          <button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined && !game.inventory.screws && !game.inventory.rebar} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button>
+        </>}
+        {panel === "inventory" && <><h2>特殊物品背包</h2>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><i className="tablet-item-icon"><TabletIcon name={id === "canOpener" ? "can" : id === "smartLeader" ? "robot" : "bolt"} size={21} /></i><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 60秒"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {Math.ceil(game.effects.holyLight?.remaining ?? 0)}s</div></>}
+        {panel === "orders" && !game.plots.some((plot) => plot.type === "synthesis") && <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="orders" size={44} /></span><h2>第一张订单，等你开工</h2><p>建造一块合成区，就能开始接收工厂订单。</p><button className="primary-action" onClick={() => { setTabletPage("shop"); setBuilderType("synthesis"); setPanel("plotBuilder"); }}>建造合成区</button></div>}
+        {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onDeliver={deliverTabletOrder} onNotice={setNotice} />}
+        {panel === "research" && <><h2>永久研究</h2>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><i className="tablet-item-icon"><TabletIcon name="factory" size={21} /></i><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高订单金币奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
+  </>;
+
   return (
     <main
       ref={viewportRef}
-      className={`viewport ${rebirthSceneHidden ? rebirthTransitionStyles.transitioning : ""} ${panning ? "is-panning" : ""} ${placingPlot || placingHoly ? "is-placing" : ""}`}
+      className={`viewport ${tabletOpen ? "tablet-is-open" : ""} ${rebirthSceneHidden ? rebirthTransitionStyles.transitioning : ""} ${panning ? "is-panning" : ""} ${placingPlot || placingHoly ? "is-placing" : ""}`}
       data-rebirth-stage={rebirthStage}
       aria-label="2.5D 采集加工经营场景"
       onKeyDown={(event: KeyboardEvent<HTMLElement>) => { if (rebirthPausedRef.current) return; if (event.key === "+" || event.key === "=") setZoom((value) => Math.min(1.5, value * 1.1)); if (event.key === "-") setZoom((value) => Math.max(.28, value * .9)); }}
@@ -1479,9 +1610,8 @@ export default function PlotWorkersGame() {
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
             <div className="zone-sign"><strong>{plot.name}</strong><span>{plot.cols}×{plot.rows} · {count}/{plotCapacity(plot)}人{plot.enabled === false ? " · 已停用" : ""}</span></div>
-            {!isPlacement && plot.type === "process" && <button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setPanel("process"); }}>配方</button>}
-            {!isPlacement && plot.type === "synthesis" && <button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setPanel("synthesis"); }}>合成</button>}
-            {!isPlacement && plot.type === "living" && <><button className="scene-action shop-action" onClick={() => setPanel("shop")}>商店</button><button className="scene-action sell-action" onClick={() => setPanel("sell")}>出售</button></>}
+            {!isPlacement && plot.type === "process" && <button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setTabletOpen(false); setPanel("process"); }}>配方</button>}
+            {!isPlacement && plot.type === "synthesis" && <button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setTabletOpen(false); setPanel("synthesis"); }}>合成</button>}
           </section>;
         })}
 
@@ -1499,39 +1629,22 @@ export default function PlotWorkersGame() {
               : project(plot, worker.u, worker.v);
           return <WalkerSprite key={worker.id} worldRef={worldRef} rebirthDelay={rebirthDelayByPlot.get(worker.zoneId ?? "") ?? 0} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id || selectedId === worker.id} hovered={hoveredWorker === worker.id} raised={plotDraft?.plot.id === worker.zoneId} foremanCommanding={commandingForemen.has(worker.id) && plot?.enabled !== false} onCommandEnd={finishForemanCycle} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={clearWorkerHover} />;
         })}
-        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.landing ? "is-landing" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
+        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.landing ? "is-landing" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`${transfer.action === "evacuate" ? "优先撤离 · " : ""}调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
       </div>
 
-      <aside className="utility-dock" aria-label="订单与背包" onPointerDown={(event) => event.stopPropagation()}>
-        <div className="dock-actions"><button onClick={() => setPanel("orders")} disabled={!game.plots.some((plot) => plot.type === "synthesis")}>订单 {game.orders.length}/2</button><button onClick={() => setPanel("inventory")}>背包 {Object.values(game.inventory.specials).reduce((sum, value) => sum + value, 0)}</button></div>
-      </aside>
+      <WorkshopTablet open={tabletOpen} activePage={tabletPage} onOpenChange={changeTabletOpen} onPageChange={selectTabletPage} unreadPages={tabletUnread} notificationVersion={tabletNotificationVersion} coins={game.coins} workerCount={game.workers.length}>
+        {tabletPage === "workers" || tabletPage === "plots" || (tabletPage === "robots" && game.schedulerServiceUnlocked) ?
+          <WorkerManager key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
+          <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="robot" size={44} /></span><h2>让机器人搭把手</h2><p>开启自动调度服务，让机器人帮忙安排工作、休息和唤醒摸鱼的小人。</p><button className="primary-action" onClick={() => selectTabletPage("shop")}>去商店看看</button></div> :
+          <div className="tablet-business-content" data-page={panel}>
+            {(panel === "plotBuilder" || panel === "research") && <button className="tablet-back" onClick={() => setPanel("shop")}>← 返回商店</button>}
+            {panelContents}
+          </div>}
+      </WorkshopTablet>
 
-      <WorkerManager key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={activeManager} coins={game.coins} robots={game.schedulerRobots} showRobots={game.schedulerServiceUnlocked} onSelect={trackWorker} onToggle={toggleManager} onTogglePlot={(plotId) => updateGame((current) => togglePlotEnabled(current, plotId))} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} />
-
-      {panel && <aside className={`floating-panel ${panel === "shop" ? "shop-panel" : ""}`} onPointerDown={(event) => event.stopPropagation()}>
-        <button className="panel-close" onClick={() => { setPanel(null); cancelPurchasedPlot(); }} aria-label="关闭">×</button>
-        {panel === "process" && selectedProcessPlot && selectedProcessState && <><h2>{selectedProcessPlot.name}配方</h2><p className="panel-note">这里只统计当前地块。切换配方会退回该地块批次原料，并重置该地块的生产数量。</p>{(["rough", "refined"] as const).map((recipeId) => { const recipe = RECIPES[recipeId]; return <button className={`panel-option ${selectedProcessState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeRecipe(current, selectedProcessPlot.id, recipeId))}><strong>{recipe.name}</strong><span>{recipe.raw} 原料 · {recipe.seconds}秒</span></button>; })}<div className="production-summary"><span>本地块生产的{RECIPES[selectedProcessState.recipe].name}产品</span><strong>{selectedProcessState.produced}件</strong></div></>}
-        {panel === "synthesis" && selectedSynthesisPlot && selectedSynthesisState && <><h2>{selectedSynthesisPlot.name}配方</h2><p className="panel-note">人物共同贡献合成速度。切换配方会退回本批材料并重置本地块产量。</p>{(["cans", "screws", "rebar"] as SynthesisRecipeId[]).map((recipeId) => { const recipe = SYNTHESIS_RECIPES[recipeId]; const materials = Object.entries(recipe.inputs).map(([kind, amount]) => `${kind === "rough" ? "粗制" : kind === "refined" ? "精制" : "螺丝"}${amount}`).join(" + "); return <button className={`panel-option ${selectedSynthesisState.recipe === recipeId ? "is-selected" : ""}`} key={recipeId} onClick={() => updateGame((current) => changeSynthesisRecipe(current, selectedSynthesisPlot.id, recipeId))}><strong>{recipe.name} ×{recipe.output}</strong><span>{materials} · {recipe.seconds}秒</span></button>; })}<div className="production-summary has-batch-progress" role="progressbar" aria-label={`${selectedSynthesisPlot.name}当前批次合成进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={synthesisPercent} aria-valuetext={`${synthesisStatus}，${synthesisPercent}%；本地块已生产${SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}${selectedSynthesisState.produced}件`} title={`${synthesisStatus} · ${synthesisPercent}%`}>
-          <BatchProgressBackground plotId={selectedSynthesisPlot.id} recipe={selectedSynthesisState.recipe} completed={selectedSynthesisState.produced / SYNTHESIS_RECIPES[selectedSynthesisState.recipe].output} progress={selectedSynthesisState.batch.progress} active={selectedSynthesisState.batch.active} />
-          <span>本地块生产的{SYNTHESIS_RECIPES[selectedSynthesisState.recipe].name}</span><strong>{selectedSynthesisState.produced}件</strong>
-        </div></>}
-        {panel === "shop" && <>
-          <h2>生活商店</h2>
-          <p className="panel-note">购买补给、人物和限时自动化服务。</p>
-          {!game.autoCanSupply && <CanPurchaseRow selectedIndex={canPurchaseIndex} coins={game.coins} onChange={setCanPurchaseIndex} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} />}
-          <AutoCanSupplyRow enabled={game.autoCanSupply} coins={game.coins} onBuy={() => spend(() => buyAutoCanSupply(game), "自动补给罐头已启用", "金币不足")} />
-          <ShopRow title="随机小人" price={workerPurchasePrice(game.workers.length)} disabled={game.coins < workerPurchasePrice(game.workers.length)} onClick={buyNewWorker} />
-          <ShopRow title={`自动调度服务 🦾 ×${game.schedulerBots}${game.schedulerSeconds > 0 ? ` · ${formatClock(game.schedulerSeconds)}` : ""}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} />
-          <AutoSchedulerSupplyRow enabled={game.autoSchedulerSupply} coins={game.coins} onBuy={() => spend(() => buyAutoSchedulerSupply(game), "自动补充调度时间已启用", "金币不足")} />
-          <ShopRow title={`增加调度机器人 · 当前${game.schedulerBots}台`} price={schedulerBotPrice(game)} disabled={game.coins < schedulerBotPrice(game)} onClick={() => spend(() => buySchedulerBot(game), `已增加第${game.schedulerBots + 1}台调度机器人`, "金币不足")} />
-          <ShopRow title="新地块（阶梯定价）" price={Math.min(...(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => nextPlotPrice(game, type, 4)))} disabled={false} onClick={() => setPanel("plotBuilder")} />
-          <button className="primary-action research-entry" onClick={() => setPanel("research")}>永久研究</button>
-        </>}
-        {panel === "plotBuilder" && <><h2>购买新地块</h2><p className="panel-note">同类型地块每购买一块，后续价格提高35%。</p><div className="builder-options">{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => <button key={type} className={builderType === type ? "is-selected" : ""} onClick={() => setBuilderType(type)}>{ZONE_META[type].name}</button>)}</div><div className="builder-options size-options">{([4, 8] as const).map((size) => <button key={size} className={builderSize === size ? "is-selected" : ""} onClick={() => setBuilderSize(size)}>{size}×{size}<small>{nextPlotPrice(game, builderType, size)}金币 · 容纳{size * size / 4}人</small></button>)}</div><button className="primary-action" disabled={game.coins < selectedPlotPrice} onClick={beginPlotPlacement}>购买并选择位置 · {selectedPlotPrice}金币</button>{placingPlot && <button className="cancel-placement" onClick={cancelPurchasedPlot}>取消摆放</button>}</>}
-        {panel === "sell" && <><h2>出售产品</h2><div className="market-strip"><span>粗制 {game.market.roughPrice} <b className={game.market.roughPrice >= 10 ? "up" : "down"}>{Math.round((game.market.roughPrice / 10 - 1) * 100)}%</b></span><span>精制 {game.market.refinedPrice} <b className={game.market.refinedPrice >= 30 ? "up" : "down"}>{Math.round((game.market.refinedPrice / 30 - 1) * 100)}%</b></span><strong>{formatClock(marketRemaining)}</strong></div><ShopRow title={`粗加工 ×${game.inventory.rough}`} price={game.inventory.rough * game.market.roughPrice} disabled={!game.inventory.rough} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "rough"))} /><ShopRow title={`精加工 ×${game.inventory.refined}`} price={game.inventory.refined * game.market.refinedPrice} disabled={!game.inventory.refined} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "refined"))} /><ShopRow title={`螺丝 ×${game.inventory.screws}`} price={game.inventory.screws * SYNTHESIS_SELL_PRICES.screws} disabled={!game.inventory.screws} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "screws"))} /><ShopRow title={`钢筋 ×${game.inventory.rebar}`} price={game.inventory.rebar * SYNTHESIS_SELL_PRICES.rebar} disabled={!game.inventory.rebar} verb="出售" onClick={() => updateGame((current) => sellProducts(current, "rebar"))} /><button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined && !game.inventory.screws && !game.inventory.rebar} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button></>}
-        {panel === "inventory" && <><h2>特殊物品背包</h2><p className="panel-note">完成订单有机会获得特殊物品。使用时机由你决定。</p>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 60秒"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {Math.ceil(game.effects.holyLight?.remaining ?? 0)}s</div></>}
-        {panel === "orders" && <><h2>工厂订单</h2><p className="panel-note">每180秒固定派发一张订单，最多同时保留2张，库存满足后由你主动交付。</p><div className="order-dispatch">{game.orders.length >= 2 ? "订单已满 · 交付一张后立即派发" : `下次订单派发还有 ${Math.ceil(180 - game.orderElapsed)} 秒`}</div>{game.orders.length ? game.orders.map((order) => { const ready = game.inventory[order.processed.kind] >= order.processed.amount && game.inventory[order.synthesized.kind] >= order.synthesized.amount; return <div className="order-card" key={order.id}><div><strong>{order.processed.kind === "rough" ? "粗制" : "精制"}×{order.processed.amount} + {order.synthesized.kind === "screws" ? "螺丝" : "钢筋"}×{order.synthesized.amount}</strong><span>{Math.ceil(order.remaining)}s · 奖励：{format(orderCoinReward(game, order))}金币{order.reward === "special" && " + 随机特殊物品 ×1"}</span></div><button disabled={!ready} onClick={() => updateGame((current) => submitOrder(current, order.id))}>交付</button></div>; }) : <div className="empty-state">暂无订单</div>}</>}
-        {panel === "research" && <><h2>永久研究</h2><p className="panel-note">高阶研究用于消耗后期资金，并永久保存在当前存档。</p>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高订单金币奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
+      {(panel === "process" || panel === "synthesis") && <aside className="floating-panel" onPointerDown={(event) => event.stopPropagation()}>
+        <button className="panel-close" onClick={() => setPanel(null)} aria-label="关闭">×</button>
+        {panelContents}
       </aside>}
 
       {placingPlot && <div className={`placement-tip ${placingPlot.valid ? "is-valid" : "is-invalid"}`}>{placingPlot.valid ? "单击放置地块 · Esc取消" : "地块发生碰撞 · Esc取消"}</div>}
@@ -1555,7 +1668,7 @@ function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { worke
   </div>;
 }
 
-function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, showRobots, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
+function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, schedulerSeconds, showRobots, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
   workers: WorkerState[];
   plots: PlotState[];
   processPlots: GameState["processPlots"];
@@ -1566,6 +1679,7 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
   activeSection: "workers" | "robots" | "plots" | null;
   coins: number;
   robots: SchedulerRobotState[];
+  schedulerSeconds: number;
   showRobots: boolean;
   onSelect: (worker: WorkerState) => void;
   onToggle: (section: "workers" | "robots" | "plots") => void;
@@ -1579,48 +1693,101 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
   const workersOpen = activeSection === "workers";
   const robotsOpen = activeSection === "robots";
   const plotsOpen = activeSection === "plots";
-  return <aside className="worker-manager" onPointerDown={(event) => event.stopPropagation()}>
+  const [plotGroup, setPlotGroup] = useState<ZoneType | "all">("all");
+  const plotGroups = (["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => ({ type, plots: plots.filter((plot) => plot.type === type) }));
+  return <aside className="worker-manager tablet-manager" onPointerDown={(event) => event.stopPropagation()}>
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
-    <div className="manager-head"><strong>人物管理</strong><span>{workers.length}人</span><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
+    <div className="manager-head"><div><h2>人物管理</h2><p>{workers.length} 人</p></div><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
     {workersOpen && <><VirtualWorkerList workers={workers} selectedId={selected?.id} trackedId={trackedId} onSelect={onSelect} />
     {selected && !isForeman(selected) && <div className="manager-detail"><div><strong>{selected.name}</strong><span>{PERSONALITY_NAMES[selected.personality]}</span></div><p>心情 <b>{Math.round(selected.mood)}</b></p><div className="manager-stats"><span>体力<b>{selected.stamina}</b></span><span>效率<b>{selected.efficiency}</b></span><span>精力<b>{selected.spirit}</b></span></div><small>点击人物列表可追踪其当前位置</small></div>}</>}
     </section>
     {showRobots && <section className={`manager-section robot-section ${robotsOpen ? "is-open" : ""}`}>
-      <div className="manager-head"><strong>机器人管理</strong><span>{robots.length}台</span><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>
+      <div className="manager-head"><div><h2>机器人管理</h2><p>{robots.length} 台 · 调度服务剩余 {formatClock(schedulerSeconds)}</p></div><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>
       {robotsOpen && <div className="robot-management">{robots.map((robot, index) => <div className="robot-upgrade" key={index}><div><strong>机器人 {index + 1}</strong><span>效率 {Math.round(robot.efficiency * 100)}% · 间隔 {robot.intervalSeconds.toFixed(1)}s</span></div><fieldset className="robot-duties"><legend>分配职责</legend>{([['rest','送去休息'],['work','送去工作'],['wake','唤醒摸鱼']] as [SchedulerDuty,string][]).map(([duty, label]) => <label key={duty}><input type="checkbox" checked={robot.duties[duty]} onChange={() => onToggleDuty(index, duty)} /><span>{label}</span></label>)}</fieldset><button disabled={coins < 100} onClick={() => onUpgradeEfficiency(index)}>效率 +1%<small>100金币</small></button><button disabled={coins < 100 || robot.intervalSeconds <= .1} onClick={() => onUpgradeInterval(index)}>间隔 −0.1s<small>100金币</small></button></div>)}</div>}
     </section>}
     <section className={`manager-section plot-manager-section ${plotsOpen ? "is-open" : ""}`}>
-      <div className="manager-head"><strong>地块管理</strong><span>{plots.length}块</span><button className="manager-toggle" onClick={() => onToggle("plots")} aria-label={plotsOpen ? "缩小地块管理" : "展开地块管理"}>{plotsOpen ? "缩小" : "展开"}</button></div>
-      {plotsOpen && <div className="plot-management"><p>停用后暂停工作与机器人分配，进行中的批次会保留。</p>{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => { const grouped = plots.filter((plot) => plot.type === type); return <section className="plot-management-group" key={type}><h3>{ZONE_META[type].name}<span>{grouped.length}块</span></h3>{grouped.map((plot, index) => {
-        const production = type === "process" ? processPlots[plot.id] : type === "synthesis" ? synthesisPlots[plot.id] : undefined;
-        const batch = production?.batch;
-        const hasProgress = type === "process" || type === "synthesis";
-        const progress = batch?.active ? Math.max(0, Math.min(1, batch.progress)) * 100 : 0;
-        const progressLabel = hasProgress ? `${ZONE_META[type].name} ${index + 1}，本批进度 ${Math.floor(progress)}%${plot.enabled === false ? "，已停用" : ""}` : undefined;
-        return <div className={`plot-management-row ${hasProgress ? "has-batch-progress" : ""} ${plot.enabled === false ? "is-disabled" : ""}`} role={hasProgress ? "group" : undefined} aria-label={progressLabel} title={progressLabel} key={plot.id}>
-          {production && <BatchProgressBackground plotId={plot.id} recipe={production.recipe} completed={production.produced / (type === "synthesis" ? SYNTHESIS_RECIPES[production.recipe as SynthesisRecipeId].output : 1)} progress={production.batch.progress} active={production.batch.active} />}
-          <div><strong>{ZONE_META[type].name} {index + 1}</strong><small>{plot.cols}×{plot.rows} · {workerCounts.get(plot.id) ?? 0}/{plotCapacity(plot)}人</small></div>{type === "process" && <select aria-label={`${plot.name}配方`} value={processPlots[plot.id]?.recipe ?? "rough"} onChange={(event) => onChangeProcessRecipe(plot.id, event.target.value as "rough" | "refined")}><option value="rough">粗加工</option><option value="refined">精加工</option></select>}{type === "synthesis" && <select aria-label={`${plot.name}配方`} value={synthesisPlots[plot.id]?.recipe ?? "cans"} onChange={(event) => onChangeSynthesisRecipe(plot.id, event.target.value as SynthesisRecipeId)}><option value="cans">罐头</option><option value="screws">螺丝</option><option value="rebar">钢筋</option></select>}<label className="plot-enabled-toggle"><input type="checkbox" checked={plot.enabled !== false} onChange={() => onTogglePlot(plot.id)} /><span>{plot.enabled === false ? "未启用" : "已启用"}</span></label></div>;
-      })}</section>; })}</div>}
+      <div className="manager-head"><div><h2>地块管理</h2><p>{plots.filter((plot) => plot.enabled !== false).length} 块启用 · {plots.length} 块地块</p></div><button className="manager-toggle" onClick={() => onToggle("plots")} aria-label={plotsOpen ? "缩小地块管理" : "展开地块管理"}>{plotsOpen ? "缩小" : "展开"}</button></div>
+      {plotsOpen && <div className="plot-management">
+        <div className="tablet-plot-filters" role="group" aria-label="按区域筛选地块">
+          <button type="button" aria-pressed={plotGroup === "all"} aria-controls="tablet-plot-results" onClick={() => setPlotGroup("all")}><span>全部</span><small>{plots.length}</small></button>
+          {plotGroups.map(({ type, plots: grouped }) => <button type="button" key={type} aria-pressed={plotGroup === type} aria-controls="tablet-plot-results" onClick={() => setPlotGroup(type)}><span>{ZONE_META[type].name}</span><small>{grouped.length}</small></button>)}
+        </div>
+        <div className="tablet-plot-groups" id="tablet-plot-results">{plotGroups.filter(({ type }) => plotGroup === "all" || type === plotGroup).map(({ type, plots: grouped }) => <section className="plot-management-group" data-zone={type} key={type} aria-labelledby={`tablet-plot-group-${type}`}>
+          <h3 id={`tablet-plot-group-${type}`}>{ZONE_META[type].name}<span>{grouped.filter((plot) => plot.enabled !== false).length} / {grouped.length} 块启用</span></h3>
+          <div className="tablet-plot-grid">{grouped.map((plot, index) => {
+            const production = type === "process" ? processPlots[plot.id] : type === "synthesis" ? synthesisPlots[plot.id] : undefined;
+            const batch = production?.batch;
+            const hasProgress = type === "process" || type === "synthesis";
+            const progress = batch?.active ? Math.max(0, Math.min(1, batch.progress)) * 100 : 0;
+            const label = `${ZONE_META[type].name} ${index + 1}`;
+            const progressLabel = hasProgress ? `${label}，本批进度 ${Math.floor(progress)}%${plot.enabled === false ? "，已停用" : ""}` : undefined;
+            const workerCount = workerCounts.get(plot.id) ?? 0;
+            return <article className={`tablet-plot-card ${plot.enabled === false ? "is-disabled" : ""}`} role={hasProgress ? "group" : undefined} aria-label={progressLabel} title={progressLabel} key={plot.id}>
+              <div className="tablet-plot-top"><i className="tablet-item-icon"><TabletIcon name={type === "living" ? "users" : "factory"} size={18} /></i><div><strong>{label}</strong><small>{plot.cols}×{plot.rows} · {ZONE_META[type].subtitle}</small></div><label className="tablet-plot-switch"><input type="checkbox" checked={plot.enabled !== false} onChange={() => onTogglePlot(plot.id)} aria-label={`启用${label}`} /><span /></label></div>
+              {type === "process" && <select aria-label={`${label}配方`} value={processPlots[plot.id]?.recipe ?? "rough"} onChange={(event) => onChangeProcessRecipe(plot.id, event.target.value as "rough" | "refined")}><option value="rough">粗加工</option><option value="refined">精加工</option></select>}
+              {type === "synthesis" && <select aria-label={`${label}配方`} value={synthesisPlots[plot.id]?.recipe ?? "cans"} onChange={(event) => onChangeSynthesisRecipe(plot.id, event.target.value as SynthesisRecipeId)}><option value="cans">罐头</option><option value="screws">螺丝</option><option value="rebar">钢筋</option></select>}
+              <div className="tablet-plot-status"><span>{workerCount}/{plotCapacity(plot)} 人{plot.enabled === false && workerCount > 0 ? " · 待撤离" : ""}</span><span>{plot.enabled === false ? "未启用" : "已启用"}</span></div>
+              {production && <div className="tablet-plot-progress has-batch-progress" role="progressbar" aria-label={`${label}本批进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(progress)}><BatchProgressBackground plotId={plot.id} recipe={production.recipe} completed={production.produced / (type === "synthesis" ? SYNTHESIS_RECIPES[production.recipe as SynthesisRecipeId].output : 1)} progress={production.batch.progress} active={production.batch.active} /></div>}
+            </article>;
+          })}{!grouped.length && <p className="tablet-plot-empty">暂无地块</p>}</div>
+        </section>)}</div>
+        <p className="tablet-plot-note">停用后暂停工作并优先撤离所有人员（含包工头），进行中的批次保留。撤离不受机器人职责限制，需要调度时间与其他启用地块的空位。</p>
+      </div>}
     </section>
   </aside>;
 }
 
-function ShopRow({ title, price, disabled, onClick, verb = "购买" }: { title: string; price: number; disabled: boolean; onClick: () => void; verb?: string }) {
-  return <div className="shop-row"><span title={title}>{title}</span><button disabled={disabled} onClick={onClick}>{verb} · {format(price)} 金币</button></div>;
+function ShopPurchase({ title, price, disabled, onClick, suffix = "" }: { title: string; price: number; disabled: boolean; onClick: () => void; suffix?: string }) {
+  return <div className="tablet-product-purchase"><span className="tablet-product-price"><strong>{format(price)}</strong><small>金币{suffix}</small></span><button disabled={disabled} onClick={onClick} aria-label={`购买${title}，${format(price)}金币${suffix}`}>购买</button></div>;
+}
+
+function ShopRow({ title, icon, description, meta, price, disabled, onClick, priceSuffix }: { title: string; icon: string; description: string; meta: string; price: number; disabled: boolean; onClick: () => void; priceSuffix?: string }) {
+  return <div className="tablet-product"><i className="tablet-item-icon"><TabletIcon name={icon} size={20} /></i><div className="tablet-product-info"><h3>{title}</h3><p>{description}</p><small>{meta}</small></div><ShopPurchase title={title} price={price} disabled={disabled} onClick={onClick} suffix={priceSuffix} /></div>;
 }
 
 function CanPurchaseRow({ selectedIndex, coins, onChange, onBuy }: { selectedIndex: number; coins: number; onChange: (index: number) => void; onBuy: (amount: number) => void }) {
   const amount = CAN_PURCHASE_AMOUNTS[selectedIndex];
   const price = amount * 2;
-  return <div className="can-purchase"><div className="can-purchase-control"><div className="can-purchase-head"><strong>罐头 ×{amount}</strong><span>选择数量</span></div><input aria-label="罐头购买数量" type="range" min="0" max="3" step="1" value={selectedIndex} onChange={(event) => onChange(Number(event.target.value))} /><div className="can-purchase-marks">{CAN_PURCHASE_AMOUNTS.map((value, index) => <button type="button" key={value} aria-pressed={index === selectedIndex} className={index === selectedIndex ? "is-selected" : ""} onClick={() => onChange(index)}>{value}</button>)}</div></div><button className="can-purchase-button" disabled={coins < price} onClick={() => onBuy(amount)}>购买 · {format(price)} 金币</button></div>;
+  return <div className="tablet-product tablet-product-cans"><i className="tablet-item-icon"><TabletIcon name="can" size={20} /></i><div className="tablet-product-info"><h3>罐头 <span>×{amount}</span></h3><p>供生活区自动恢复心情</p><div className="tablet-can-picker"><input aria-label="罐头购买数量" type="range" min="0" max="3" step="1" value={selectedIndex} onChange={(event) => onChange(Number(event.target.value))} /><div>{CAN_PURCHASE_AMOUNTS.map((value, index) => <button type="button" key={value} aria-pressed={index === selectedIndex} onClick={() => onChange(index)}>{value}</button>)}</div></div></div><ShopPurchase title={`${amount} 个罐头`} price={price} disabled={coins < price} onClick={() => onBuy(amount)} /></div>;
 }
 
-function AutoCanSupplyRow({ enabled, coins, onBuy }: { enabled: boolean; coins: number; onBuy: () => void }) {
-  const title = enabled ? "自动补给罐头 · 已启用" : "自动补给罐头 · 库存低于200";
-  return <div className="shop-row auto-can-row"><span title="低于200时自动购买200个，每次花费400金币">{title}</span><button disabled={enabled || coins < 5000} onClick={onBuy}>{enabled ? "已启用" : "购买 · 5,000 金币"}</button></div>;
+function AutoCanSupplyRow({ coins, onBuy }: { coins: number; onBuy: () => void }) {
+  return <ShopRow title="自动补给罐头" icon="can" description="库存低于 200 时，自动购买 200 个" meta="每次花费 400 金币" price={5000} disabled={coins < 5000} onClick={onBuy} />;
 }
 
-function AutoSchedulerSupplyRow({ enabled, coins, onBuy }: { enabled: boolean; coins: number; onBuy: () => void }) {
-  const title = enabled ? "自动补充调度 · 已启用" : "自动补充调度 · 时间低于180s";
-  return <div className="shop-row"><span title="低于180秒时自动购买180秒，每次花费300金币">{title}</span><button disabled={enabled || coins < 5000} onClick={onBuy}>{enabled ? "已启用" : "购买 · 5,000 金币"}</button></div>;
+function AutoSchedulerSupplyRow({ coins, onBuy }: { coins: number; onBuy: () => void }) {
+  return <ShopRow title="自动补充调度" icon="clock" description="时间低于 180 秒时，自动补充 180 秒" meta="每次花费 300 金币" price={5000} disabled={coins < 5000} onClick={onBuy} />;
+}
+
+function ProductSaleRow({ name, stock, price, onSell }: { name: string; stock: number; price: number; onSell: (amount: number) => void }) {
+  const [requestedAmount, setRequestedAmount] = useState<number | "">(10);
+  const pointerSliding = useRef(false);
+  const available = Math.max(0, Math.floor(stock));
+  const normalize = (value: number) => Number.isFinite(value) ? Math.max(0, Math.min(available, Math.floor(value))) : 0;
+  const amount = normalize(Number(requestedAmount));
+  const snapAmount = (value: number) => {
+    const quantity = normalize(value);
+    if (available < 4) return quantity;
+    const nearest = [.25, .5, .75].map((ratio) => Math.round(available * ratio))
+      .sort((a, b) => Math.abs(a - quantity) - Math.abs(b - quantity))[0];
+    return Math.abs(nearest - quantity) <= available * .02 ? nearest : quantity;
+  };
+  return <section className="product-sale-row" aria-label={`${name}出售`}>
+    <div className="product-sale-heading"><strong>{name}</strong><span>库存 {format(available)}</span></div>
+    <div className="product-sale-controls">
+      <div className="product-sale-slider">
+        {available >= 4 && <div className="product-sale-snap-marks" aria-hidden="true">{[25, 50, 75].map((percent) => <i key={percent} style={{ left: `${percent}%` }} />)}</div>}
+        <input className="product-sale-range" type="range" aria-label={`${name}出售数量滑条`} min={0} max={Math.max(1, available)} step={1} value={amount} disabled={!available}
+          onPointerDown={() => { pointerSliding.current = true; }}
+          onChange={(event) => setRequestedAmount(pointerSliding.current ? snapAmount(Number(event.target.value)) : normalize(Number(event.target.value)))}
+          onPointerUp={(event) => { pointerSliding.current = false; setRequestedAmount(snapAmount(Number(event.currentTarget.value))); }}
+          onPointerCancel={() => { pointerSliding.current = false; }}
+          onLostPointerCapture={() => { pointerSliding.current = false; }}
+          onBlur={() => { pointerSliding.current = false; }}
+          onKeyDown={() => { pointerSliding.current = false; }} />
+      </div>
+      <input className="product-sale-amount" type="number" aria-label={`${name}出售数量`} inputMode="numeric" min={0} max={available} step={1} value={requestedAmount === "" ? "" : amount} disabled={!available} onChange={(event) => setRequestedAmount(event.target.value === "" ? "" : normalize(Number(event.target.value)))} onBlur={() => setRequestedAmount(amount)} />
+    </div>
+    <div className="product-sale-footer"><span>单价 {format(price)} 金币</span><button disabled={!amount} onClick={() => onSell(amount)}>出售 · {format(amount * price)} 金币</button></div>
+  </section>;
 }

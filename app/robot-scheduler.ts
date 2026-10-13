@@ -23,6 +23,7 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
   let heap: RobotDeadline[] = [];
   let initialized = false;
   let enabled = false;
+  let urgent = false;
   let disposed = false;
   let generation = 0;
   let timer: number | null = null;
@@ -166,7 +167,18 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
     for (let index = firstChanged; index < robots.length; index += 1) {
       const robot = robots[index];
       if (robot.busy) continue;
-      setDeadline(robot, enabled ? currentTime + randomBetween(0, 3000) : null);
+      setDeadline(robot, enabled ? currentTime + (urgent ? 0 : randomBetween(0, 3000)) : null);
+    }
+    arm();
+  }
+
+  function setUrgent(nextUrgent: boolean) {
+    if (disposed || urgent === nextUrgent) return;
+    urgent = nextUrgent;
+    if (!enabled || !urgent) return;
+    const currentTime = options.now();
+    for (const robot of robots) {
+      if (!robot.busy) setDeadline(robot, currentTime);
     }
     arm();
   }
@@ -177,7 +189,7 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
     robot.busy = false;
     robot.revision += 1;
     setDeadline(robot, enabled
-      ? options.now() + Math.max(100, options.getIntervalSeconds(botIndex) * 1000 * randomBetween(.9, 1.1))
+      ? options.now() + (urgent ? 0 : Math.max(100, options.getIntervalSeconds(botIndex) * 1000 * randomBetween(.9, 1.1)))
       : null);
     arm();
   }
@@ -187,7 +199,7 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
     if (disposed || !robot?.busy) return;
     robot.busy = false;
     robot.revision += 1;
-    setDeadline(robot, enabled ? retryDeadline() : null);
+    setDeadline(robot, enabled ? (urgent ? options.now() : retryDeadline()) : null);
     arm();
   }
 
@@ -198,6 +210,7 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
     heap = [];
     initialized = false;
     enabled = false;
+    urgent = false;
     lastDispatchAt = -Infinity;
   }
 
@@ -206,5 +219,5 @@ export function createRobotScheduler(options: RobotSchedulerOptions) {
     disposed = true;
   }
 
-  return { sync, complete, release, reset, dispose };
+  return { sync, setUrgent, complete, release, reset, dispose };
 }

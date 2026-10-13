@@ -527,11 +527,10 @@ export function chooseAutoDispatch(
   busyWorkerIds: string[] = [],
   reservedTargetIds: string[] = [],
   duties: SchedulerRobotState["duties"] = { rest: true, work: true, wake: true },
-): { workerId: string; targetId: string; action: "rest" | "work" | "wake" } | null {
-  // Foremen occupy ordinary work slots, but their placement is always manual.
-  const busy = new Set([...busyWorkerIds, ...state.workers.filter(isForeman).map((worker) => worker.id)]);
+): { workerId: string; targetId: string; action: "rest" | "work" | "wake" | "evacuate" } | null {
+  const busy = new Set([...busyWorkerIds, ...state.workers.filter((worker) => worker.status === "dragging").map((worker) => worker.id)]);
   const capacity = (plot: PlotState) => Math.floor(plot.cols * plot.rows / 4);
-  const plotTypes = new Map(state.plots.map((plot) => [plot.id, plot.type]));
+  const plotsById = new Map(state.plots.map((plot) => [plot.id, plot]));
   const occupancyByPlot = new Map<string, number>();
   for (const worker of state.workers) {
     if (worker.zoneId) occupancyByPlot.set(worker.zoneId, (occupancyByPlot.get(worker.zoneId) ?? 0) + 1);
@@ -546,26 +545,43 @@ export function chooseAutoDispatch(
       .map((plot) => RECIPES[state.processPlots[plot.id]?.recipe ?? "rough"].raw),
   );
   const preferredType: ZoneType = state.inventory.raw >= requiredRaw ? "process" : "gather";
-  const balancedWorkPlot = () => [...workPlots].sort((a, b) => {
+  const balancedWorkPlot = (plots = workPlots) => [...plots].sort((a, b) => {
     const ratioDifference = occupancy(a.id) / capacity(a) - occupancy(b.id) / capacity(b);
     if (ratioDifference) return ratioDifference;
     const typeDifference = Number(b.type === preferredType) - Number(a.type === preferredType);
     return typeDifference || occupancy(a.id) - occupancy(b.id) || a.id.localeCompare(b.id);
   })[0];
+  const balancedLivingPlot = () => [...livingPlots].sort((a, b) => occupancy(a.id) / capacity(a) - occupancy(b.id) / capacity(b))[0];
+
+  // Evacuation takes precedence over every configured duty and includes foremen.
+  for (const worker of state.workers) {
+    if (busy.has(worker.id) || !worker.zoneId) continue;
+    const source = plotsById.get(worker.zoneId);
+    if (source?.enabled !== false) continue;
+    const needsRest = worker.mood <= 0 || (source.type === "living" && worker.mood < 100);
+    const target = (needsRest ? balancedLivingPlot() : undefined)
+      ?? (worker.mood > 0 && source.type !== "living" ? balancedWorkPlot(workPlots.filter((plot) => plot.type === source.type)) : undefined)
+      ?? balancedWorkPlot()
+      ?? balancedLivingPlot();
+    if (target) return { workerId: worker.id, targetId: target.id, action: "evacuate" };
+  }
+
+  // Foremen occupy ordinary work slots, but only evacuation may move them automatically.
+  for (const worker of state.workers) if (isForeman(worker)) busy.add(worker.id);
   const exhausted = duties.rest ? state.workers.find((worker) =>
     !busy.has(worker.id) &&
     worker.status === "exhausted" &&
-    (!worker.zoneId || plotTypes.get(worker.zoneId) !== "living")
+    (!worker.zoneId || plotsById.get(worker.zoneId)?.type !== "living")
   ) : undefined;
 
   if (exhausted && livingPlots.length) {
-    const target = [...livingPlots].sort((a, b) => occupancy(a.id) / capacity(a) - occupancy(b.id) / capacity(b))[0];
+    const target = balancedLivingPlot();
     return { workerId: exhausted.id, targetId: target.id, action: "rest" };
   }
 
   if (exhausted && !livingPlots.length && duties.work) {
     const candidate = state.workers
-      .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && Boolean(worker.zoneId) && plotTypes.get(worker.zoneId!) === "living")
+      .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living")
       .sort((a, b) => b.mood - a.mood)[0];
     const target = balancedWorkPlot();
     if (candidate && target) return { workerId: candidate.id, targetId: target.id, action: "work" };
@@ -573,14 +589,14 @@ export function chooseAutoDispatch(
 
 
   if (duties.wake) {
-    const slacking = state.workers.find((worker) => !busy.has(worker.id) && worker.status === "slacking" && Boolean(worker.zoneId));
+    const slacking = state.workers.find((worker) => !busy.has(worker.id) && worker.status === "slacking" && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.enabled !== false);
     if (slacking?.zoneId) return { workerId: slacking.id, targetId: slacking.zoneId, action: "wake" };
   }
 
   const ready = duties.work ? state.workers.find((worker) =>
     !busy.has(worker.id) &&
     worker.status === "ready" &&
-    Boolean(worker.zoneId) && plotTypes.get(worker.zoneId!) === "living"
+    Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living"
   ) : undefined;
   const target = balancedWorkPlot();
   return ready && target ? { workerId: ready.id, targetId: target.id, action: "work" } : null;
@@ -589,11 +605,18 @@ export function chooseAutoDispatch(
 export function sellProducts(
   state: GameState,
   kind: "rough" | "refined" | "screws" | "rebar" | "all",
+  amount?: number,
 ): GameState {
-  const roughCount = kind === "all" || kind === "rough" ? state.inventory.rough : 0;
-  const refinedCount = kind === "all" || kind === "refined" ? state.inventory.refined : 0;
-  const screwCount = kind === "all" || kind === "screws" ? state.inventory.screws : 0;
-  const rebarCount = kind === "all" || kind === "rebar" ? state.inventory.rebar : 0;
+  const requestedAmount = kind !== "all" && amount !== undefined ? Math.floor(amount) : undefined;
+  if (requestedAmount !== undefined && (!Number.isFinite(requestedAmount) || requestedAmount <= 0)) return state;
+  const saleCount = (product: "rough" | "refined" | "screws" | "rebar") => {
+    if (kind !== "all" && kind !== product) return 0;
+    return requestedAmount === undefined ? state.inventory[product] : Math.min(requestedAmount, Math.max(0, Math.floor(state.inventory[product])));
+  };
+  const roughCount = saleCount("rough");
+  const refinedCount = saleCount("refined");
+  const screwCount = saleCount("screws");
+  const rebarCount = saleCount("rebar");
   if (roughCount + refinedCount + screwCount + rebarCount === 0) return state;
   return {
     ...state,

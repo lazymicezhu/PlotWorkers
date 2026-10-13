@@ -28,12 +28,11 @@ test("server-renders the complete workshop scene", async () => {
   assert.match(html, /螺丝\/钢筋/);
   assert.doesNotMatch(html, /class="event-dock|class="event-toggle/);
   assert.doesNotMatch(html, /下一资源区|环境雷达|陨石预警|应急医疗|结构工程/);
-  assert.match(html, /订单/);
-  assert.match(html, /背包/);
-  assert.match(html, /人物管理/);
+  assert.match(html, /aria-label="打开工坊平板"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /class="utility-dock"|class="worker-manager/);
   assert.doesNotMatch(html, /机器人管理/);
   assert.match(html, /机器人时间\/数量/);
-  assert.match(html, /精神饱满/);
   assert.match(html, /<canvas[^>]+class="worker-canvas"/);
   assert.doesNotMatch(html, /class="(?:hair|face|torso|arm|leg|shoe)"/);
   assert.match(html, /class="plot-baked" src="\/plot-baked-gather-8\.png"/);

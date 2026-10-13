@@ -6,10 +6,9 @@ import {
   recordPerformanceFrame,
   setPerformanceMonitoringEnabled,
 } from "./performance-metrics";
-import type { GamePerformanceSnapshot, GameTaskKind } from "./performance-metrics";
+import type { GamePerformanceSnapshot } from "./performance-metrics";
 
 type Props = { enabled: boolean; workers: number; robots: number };
-const TASK_LABELS: [GameTaskKind, string][] = [["dispatch", "调度"], ["simulation", "模拟"], ["save", "保存"]];
 
 function milliseconds(value: number | null | undefined) {
   return value == null ? "—" : `${value.toFixed(2)} ms`;
@@ -69,15 +68,6 @@ function ActivePerformanceOverlay({ workers, robots }: Omit<Props, "enabled">) {
         <div title="相邻画面帧间隔超过 50 毫秒的次数。"><dt>帧间隔 &gt; 50 ms</dt><dd>{snapshot?.frameCount ? `${snapshot.longFrameCount} 次 / 5 秒` : "—"}</dd></div>
         <div><dt>人物 / 机器人</dt><dd>{workers} / {robots}</dd></div>
       </dl>
-      {TASK_LABELS.map(([kind, label]) => {
-        const task = snapshot?.tasks[kind];
-        return (
-          <div className="performance-overlay-task" key={kind} title={`近 5 秒${label}累计耗时 ${milliseconds(task?.totalMs)}，最长一次 ${milliseconds(task?.maxMs)}。`}>
-            <span>{label}平均</span><strong>{milliseconds(task?.averageMs)}</strong><span>{task ? `${task.count} 次 / 5 秒` : "—"}</span>
-          </div>
-        );
-      })}
-      <p className="performance-overlay-note">耗时统计近 5 秒 · 非 CPU 使用率</p>
     </aside>
   );
 }
