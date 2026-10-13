@@ -6,6 +6,7 @@ import {
   CSSProperties,
   KeyboardEvent,
   PointerEvent,
+  SetStateAction,
   memo,
   startTransition,
   useCallback,
@@ -64,7 +65,7 @@ import {
   useSpecialItem as consumeSpecialItem,
   workerPurchasePrice,
 } from "./game-engine";
-import { reconcileSimulation, simulateElapsed } from "./simulation-protocol";
+import { reconcileSimulationWithActivity, simulateElapsedWithActivity } from "./simulation-protocol";
 import type { SimulationStepRequest, SimulationStepResponse } from "./simulation-protocol";
 import SimulationWorker from "./simulation.worker?worker";
 import { CanvasWorkers, getCanvasWorkerPosition, hitTestCanvasWorker, setCanvasWorkerHandoff, clearCanvasWorkerHandoffs } from "./worker-canvas";
@@ -89,6 +90,7 @@ import { saveFirstRebirth } from "./rebirth-save";
 import { RebirthReveal } from "./rebirth-reveal";
 import { RebirthTransition, rebirthTransitionStyles } from "./rebirth-transition";
 import { ResourceHud } from "./resource-hud";
+import { createGameView, updateGameView } from "./resource-activity";
 
 const TILE_W = 104;
 const TILE_H = 54;
@@ -99,6 +101,7 @@ const PLOT_DRAG_Z = SCENE_DRAG_Z + 100_000;
 const SAVE_KEY = "green-realm-save-v1";
 const ZOOM_KEY = "green-realm-player-zoom";
 const PERFORMANCE_KEY = "green-realm-performance-display";
+const RESOURCE_CHANGES_KEY = "green-realm-resource-change-display";
 
 function persistGame(state: GameState) {
   measureGameTask("save", () => localStorage.setItem(SAVE_KEY, JSON.stringify(state)));
@@ -327,7 +330,11 @@ export default function PlotWorkersGame() {
   const simulationEpochRef = useRef(0);
   const simulationLastTimeRef = useRef(0);
   const unsimulatedSecondsRef = useRef(0);
-  const [game, setGame] = useState<GameState>(() => createInitialState(initialPoint.x, initialPoint.y));
+  const [gameView, setGameView] = useState(() => createGameView(createInitialState(initialPoint.x, initialPoint.y)));
+  const game = gameView.game;
+  const setGame = useCallback((update: SetStateAction<GameState>) => {
+    setGameView((view) => updateGameView(view, typeof update === "function" ? update(view.game) : update));
+  }, []);
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
   const [viewportSize, setViewportSize] = useState({ width: 1440, height: 900 });
@@ -351,6 +358,7 @@ export default function PlotWorkersGame() {
   const [rebirthError, setRebirthError] = useState("");
   const rebirthSceneHidden = rebirthStage === "dissolving" || rebirthStage === "reward";
   const [performanceEnabled, setPerformanceEnabled] = useState(false);
+  const [resourceChangesEnabled, setResourceChangesEnabled] = useState(true);
   const [worldRevision, setWorldRevision] = useState(0);
   const [notice, setNotice] = useState("");
   const [builderType, setBuilderType] = useState<ZoneType>("gather");
@@ -484,14 +492,14 @@ export default function PlotWorkersGame() {
       const pending = pendingSimulationRef.current;
       if (event.data.type !== "stepped" || !pending || event.data.id !== pending.id) return;
       startTransition(() => {
-        setGame((current) => {
-          if (pending.epoch !== simulationEpochRef.current) return current;
+        setGameView((view) => {
+          if (pending.epoch !== simulationEpochRef.current) return view;
           pendingSimulationRef.current = null;
           const measurementStart = isPerformanceMonitoringEnabled() ? performance.now() : null;
-          const next = reconcileSimulation(pending.base, current, event.data.state, pending.seconds);
+          const next = reconcileSimulationWithActivity(pending.base, view.game, event.data, pending.seconds);
           if (measurementStart !== null) recordGameTask("simulation", (event.data.simulationMs ?? 0) + performance.now() - measurementStart);
           unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
-          return next;
+          return updateGameView(view, next.state, next.activity);
         });
       });
     };
@@ -513,12 +521,13 @@ export default function PlotWorkersGame() {
       gameRef.current = saved;
       // Restore browser-only state after hydration; synchronous restoration is intentional.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setGame(saved);
+      setGameView(createGameView(saved));
       setSelectedId(saved.workers[0]?.id ?? null);
     }
     const savedZoom = Number(localStorage.getItem(ZOOM_KEY));
     if (Number.isFinite(savedZoom) && savedZoom >= .28 && savedZoom <= 1.5) setZoom(savedZoom);
     setPerformanceEnabled(localStorage.getItem(PERFORMANCE_KEY) === "true");
+    setResourceChangesEnabled(localStorage.getItem(RESOURCE_CHANGES_KEY) !== "false");
     const updateViewportSize = () => setViewportSize({ width: window.innerWidth, height: window.innerHeight });
     updateViewportSize();
     window.addEventListener("resize", updateViewportSize);
@@ -575,10 +584,11 @@ export default function PlotWorkersGame() {
           const seconds = unsimulatedSecondsRef.current;
           const epoch = simulationEpochRef.current;
           startTransition(() => {
-            setGame((current) => {
-              if (epoch !== simulationEpochRef.current) return current;
+            setGameView((view) => {
+              if (epoch !== simulationEpochRef.current) return view;
               unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - seconds);
-              return measureGameTask("simulation", () => simulateElapsed(current, seconds));
+              const next = measureGameTask("simulation", () => simulateElapsedWithActivity(view.game, seconds));
+              return updateGameView(view, next.state, next.activity);
             });
           });
         }
@@ -684,7 +694,7 @@ export default function PlotWorkersGame() {
       }));
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [finishForemanCycle]);
+  }, [finishForemanCycle, setGame]);
 
   useEffect(() => {
     return startGameAutosave((reason) => {
@@ -1270,7 +1280,7 @@ export default function PlotWorkersGame() {
     foremanCommandAtRef.current.clear();
     setCommandingForemen(new Set());
     gameRef.current = next;
-    setGame(next);
+    setGameView(createGameView(next));
     setWorldRevision((revision) => revision + 1);
     setSelectedId(next.workers[0]?.id ?? null);
     setSelectedProcessPlotId(next.plots.find((plot) => plot.type === "process")?.id ?? "");
@@ -1419,8 +1429,22 @@ export default function PlotWorkersGame() {
       onLostPointerCapture={finishPan}
       tabIndex={0}
     >
-      <ResourceHud key={`hud-${worldRevision}`} game={game} onSettings={() => setSettingsOpen(true)} />
-      {settingsOpen && <SettingsDialog game={game} onClose={() => setSettingsOpen(false)} onImport={importSave} onReset={resetGame} performanceEnabled={performanceEnabled} onPerformanceChange={(enabled) => { setPerformanceEnabled(enabled); localStorage.setItem(PERFORMANCE_KEY, String(enabled)); }} rebirth={{ completed: game.rebirthCount > 0, onRebirth: beginRebirth }} />}
+      <ResourceHud key={`hud-${worldRevision}-${resourceChangesEnabled}`} game={game} activity={gameView.activity} showChanges={resourceChangesEnabled} onSettings={() => setSettingsOpen(true)} />
+      {settingsOpen && <SettingsDialog
+        game={game}
+        onClose={() => setSettingsOpen(false)}
+        onImport={importSave}
+        onReset={resetGame}
+        performanceEnabled={performanceEnabled}
+        onPerformanceChange={(enabled) => { setPerformanceEnabled(enabled); localStorage.setItem(PERFORMANCE_KEY, String(enabled)); }}
+        resourceChangesEnabled={resourceChangesEnabled}
+        onResourceChangesChange={(enabled) => {
+          setResourceChangesEnabled(enabled);
+          try { localStorage.setItem(RESOURCE_CHANGES_KEY, String(enabled)); }
+          catch { /* Keep the current preference working when browser storage is unavailable. */ }
+        }}
+        rebirth={{ completed: game.rebirthCount > 0, onRebirth: beginRebirth }}
+      />}
       {rebirthStage === "dissolving" && <RebirthTransition onComplete={finishRebirthTransition} />}
       {rebirthStage === "reward" && <RebirthReveal onContinue={continueRebirth} error={rebirthError} />}
       <PerformanceOverlay enabled={performanceEnabled} workers={game.workers.length} robots={game.schedulerBots} />

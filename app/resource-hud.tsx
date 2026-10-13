@@ -3,6 +3,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { GameState } from "./game-engine";
 import { formatHudExact, formatHudGain, formatHudNumber } from "./hud-number";
+import type { ResourceActivity, ResourceKind } from "./resource-activity";
 import styles from "./resource-hud.module.css";
 
 const resources = [
@@ -15,56 +16,83 @@ const resources = [
 ] as const;
 type ResourceId = typeof resources[number]["id"];
 type Snapshot = Record<ResourceId, readonly number[]>;
-type Gains = Partial<Record<ResourceId, { id: number; text: string }>>;
+type Receipt = { id: number; text: string; expiresAt: number };
+type Receipts = Partial<Record<ResourceId, { gain?: Receipt; loss?: Receipt }>>;
+const activityKinds: Partial<Record<ResourceId, readonly ResourceKind[]>> = {
+  coins: ["coins"], raw: ["raw"], cans: ["cans"], processed: ["rough", "refined"], products: ["screws", "rebar"],
+};
 
 function isPair(id: ResourceId) {
   return id === "processed" || id === "products";
 }
 
-export function ResourceHud({ game, onSettings }: { game: GameState; onSettings: () => void }) {
+export function ResourceHud({ game, activity, showChanges, onSettings }: { game: GameState; activity: ResourceActivity; showChanges: boolean; onSettings: () => void }) {
   const { coins, schedulerSeconds, schedulerBots } = game;
   const { raw, cans, rough, refined, screws, rebar } = game.inventory;
   const values = useMemo<Snapshot>(() => ({
     coins: [coins], raw: [raw], cans: [cans], processed: [rough, refined],
     products: [screws, rebar], robot: [Math.ceil(schedulerSeconds), schedulerBots],
   }), [coins, raw, cans, rough, refined, screws, rebar, schedulerSeconds, schedulerBots]);
-  const latestValues = useRef(values);
+  const latestActivity = useRef(activity);
   const headerRef = useRef<HTMLElement>(null);
   const buttonRefs = useRef<Partial<Record<ResourceId, HTMLButtonElement>>>({});
   const [selected, setSelected] = useState<{ id: ResourceId; left: number } | null>(null);
-  const [gains, setGains] = useState<Gains>({});
+  const [receipts, setReceipts] = useState<Receipts>({});
   const detailId = useId();
 
-  useEffect(() => { latestValues.current = values; }, [values]);
+  useEffect(() => { latestActivity.current = activity; }, [activity]);
 
   useEffect(() => {
-    let previous: Snapshot | null = null;
+    if (!showChanges) return;
+    let previous = latestActivity.current;
     let sequence = 0;
-    // Sampling only groups the floating receipts; the main values render immediately.
-    // Establish the first baseline after browser save restoration has completed.
+    // Read separate cumulative receipts so production and consumption cannot cancel
+    // each other, even if several simulation steps are committed together.
     const timer = window.setInterval(() => {
-      const current = latestValues.current;
-      const next: Gains = {};
-      if (previous && !document.hidden) {
+      const current = latestActivity.current;
+      const updates: Receipts = {};
+      const now = performance.now();
+      if (!document.hidden) {
         for (const { id } of resources) {
-          if (id === "robot") continue;
-          const before = previous[id];
-          const amounts = current[id].map((value, index) => Math.max(0, value - before[index]));
-          const hiddenIncrease = current[id].some((value, index) => amounts[index] > 0
-            && formatHudNumber(value, isPair(id)) === formatHudNumber(before[index], isPair(id)));
-          if (hiddenIncrease) next[id] = { id: ++sequence, text: amounts.map((amount) => `+${formatHudGain(amount)}`).join(" / ") };
+          const kinds = activityKinds[id];
+          if (!kinds) continue;
+          for (const direction of ["gain", "loss"] as const) {
+            const field = direction === "gain" ? "gained" : "spent";
+            const amounts = kinds.map((kind) => Math.max(0, Number((current[kind][field] - previous[kind][field]).toPrecision(12))));
+            if (amounts.some((amount) => amount > 0)) {
+              const sign = direction === "gain" ? "+" : "−";
+              updates[id] ??= {};
+              updates[id][direction] = {
+                id: ++sequence,
+                text: amounts.map((amount) => `${amount > 0 ? sign : ""}${formatHudGain(amount)}`).join("/"),
+                expiresAt: now + 1000,
+              };
+            }
+          }
         }
       }
-      previous = document.hidden ? null : current;
-      setGains((old) => Object.keys(next).length || Object.keys(old).length ? next : old);
-    }, 750);
-    const resetBaseline = () => { previous = null; setGains({}); };
+      previous = current;
+      setReceipts((old) => {
+        const next: Receipts = {};
+        let changed = false;
+        for (const { id } of resources) {
+          for (const direction of ["gain", "loss"] as const) {
+            const prior = old[id]?.[direction];
+            const receipt = updates[id]?.[direction] ?? (prior && prior.expiresAt > now ? prior : undefined);
+            if (receipt !== prior) changed = true;
+            if (receipt) { next[id] ??= {}; next[id][direction] = receipt; }
+          }
+        }
+        return changed ? next : old;
+      });
+    }, 150);
+    const resetBaseline = () => { previous = latestActivity.current; setReceipts({}); };
     document.addEventListener("visibilitychange", resetBaseline);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", resetBaseline);
     };
-  }, []);
+  }, [showChanges]);
 
   useEffect(() => {
     if (!selected) return;
@@ -103,7 +131,7 @@ export function ResourceHud({ game, onSettings }: { game: GameState; onSettings:
       const warning = id === "raw" ? raw <= 0 : id === "cans" ? cans < 20 : id === "robot" && schedulerSeconds < 60;
       const className = [styles.card, paired ? styles.pair : "", id === "robot" ? styles.robot : "", id === "coins" ? styles.gold : "", warning ? styles.warning : ""].filter(Boolean).join(" ");
       if (id === "robot" && schedulerBots <= 0) return <div key={id} className={`${className} ${styles.empty}`} aria-hidden="true" />;
-      const gain = gains[id];
+      const changes = showChanges ? receipts[id] : undefined;
       return <button
         key={id}
         type="button"
@@ -121,7 +149,8 @@ export function ResourceHud({ game, onSettings }: { game: GameState; onSettings:
             : paired ? <><span className={styles.number}>{formatHudNumber(values[id][0], true)}</span><span className={styles.divider}>/</span><span className={styles.number}>{formatHudNumber(values[id][1], true)}</span></>
               : <span className={styles.number}>{formatHudNumber(values[id][0])}</span>}
         </strong>
-        {gain && <span key={gain.id} className={styles.gain} aria-hidden="true">{gain.text}</span>}
+        {changes?.gain && <span key={changes.gain.id} className={`${styles.change} ${styles.gain}`} data-resource-change="gain" aria-hidden="true">{changes.gain.text}</span>}
+        {changes?.loss && <span key={changes.loss.id} className={`${styles.change} ${styles.loss}`} data-resource-change="loss" aria-hidden="true">{changes.loss.text}</span>}
       </button>;
     })}
     <button type="button" className="settings-button" aria-label="设置与存档" title="设置与存档" aria-haspopup="dialog" onClick={() => { setSelected(null); onSettings(); }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 3-.5 2a7 7 0 0 0-1.8 1l-2-.6-2 3.5 1.5 1.5a7 7 0 0 0 0 3.2l-1.5 1.5 2 3.5 2-.6a7 7 0 0 0 1.8 1l.5 2h4l.5-2a7 7 0 0 0 1.8-1l2 .6 2-3.5-1.5-1.5a7 7 0 0 0 0-3.2l1.5-1.5-2-3.5-2 .6a7 7 0 0 0-1.8-1L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>

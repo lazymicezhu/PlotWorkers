@@ -1,5 +1,7 @@
 import { stepGame } from "./game-engine.ts";
 import type { GameState } from "./game-engine.ts";
+import { createResourceActivity, recordResourceChange } from "./resource-activity.ts";
+import type { ResourceActivity, ResourceKind } from "./resource-activity.ts";
 
 const VISUAL_WORKER_FIELDS = new Set(["u", "v", "x", "y", "duration", "facing"]);
 const WORKERS_FIELD = new Set(["workers"]);
@@ -24,41 +26,46 @@ export type SimulationStepResponse = {
   type: "stepped";
   id: number;
   state: GameState;
+  activity: ResourceActivity;
   seconds: number;
   simulationMs?: number;
 };
+
+export type SimulationResult = { state: GameState; activity: ResourceActivity };
 
 export function simulateElapsed(
   state: GameState,
   seconds: number,
   random = Math.random,
+  onResourceChange?: (kind: ResourceKind, delta: number) => void,
 ) {
   let next = state;
   let remaining = Math.max(0, Math.min(5, seconds));
   while (remaining > 0) {
     const dt = Math.min(1, remaining);
-    next = stepGame(next, dt, random);
+    next = stepGame(next, dt, random, onResourceChange);
     remaining -= dt;
   }
   return next;
 }
 
-export function reconcileSimulation(
-  base: GameState,
-  current: GameState,
-  result: GameState,
+export function simulateElapsedWithActivity(
+  state: GameState,
   seconds: number,
   random = Math.random,
-): GameState {
-  if (current === base) return result;
-  const onlyVisualChanges = sameFieldsExcept(base, current, WORKERS_FIELD)
+): SimulationResult {
+  const activity = createResourceActivity();
+  const next = simulateElapsed(state, seconds, random, (kind, delta) => recordResourceChange(activity, kind, delta));
+  return { state: next, activity };
+}
+
+function onlyVisualChanges(base: GameState, current: GameState) {
+  return sameFieldsExcept(base, current, WORKERS_FIELD)
     && base.workers.length === current.workers.length
     && base.workers.every((worker, index) => sameFieldsExcept(worker, current.workers[index], VISUAL_WORKER_FIELDS));
-  if (!onlyVisualChanges) {
-    // A purchase, recipe change or worker transfer invalidates the old result.
-    // Recompute immediately instead of leaving production idle until the next tick.
-    return simulateElapsed(current, seconds, random);
-  }
+}
+
+function preserveWorkerMovement(current: GameState, result: GameState): GameState {
   // Walking does not affect production. Preserve its latest destination while
   // keeping every economic and worker-status change computed in the background.
   const currentWorkers = new Map(current.workers.map((worker) => [worker.id, worker]));
@@ -77,4 +84,36 @@ export function reconcileSimulation(
       } : worker;
     }),
   };
+}
+
+export function reconcileSimulation(
+  base: GameState,
+  current: GameState,
+  result: GameState,
+  seconds: number,
+  random = Math.random,
+): GameState {
+  if (current === base) return result;
+  if (!onlyVisualChanges(base, current)) {
+    // A purchase, recipe change or worker transfer invalidates the old result.
+    // Recompute immediately instead of leaving production idle until the next tick.
+    return simulateElapsed(current, seconds, random);
+  }
+  return preserveWorkerMovement(current, result);
+}
+
+export function reconcileSimulationWithActivity(
+  base: GameState,
+  current: GameState,
+  result: SimulationResult,
+  seconds: number,
+  random = Math.random,
+): SimulationResult {
+  if (current === base) return result;
+  if (!onlyVisualChanges(base, current)) {
+    // Discard the stale receipts along with the stale state. Only the recomputed
+    // simulation's actual resource changes belong to the committed result.
+    return simulateElapsedWithActivity(current, seconds, random);
+  }
+  return { state: preserveWorkerMovement(current, result.state), activity: result.activity };
 }

@@ -29,9 +29,12 @@
 .gold .values { color: #896015; }
 .warning .caption, .warning .values { color: #bd443f; }
 .empty { visibility: hidden; }
-.gain { position: absolute; top: -19px; right: 8px; height: 14px; color: #577b50; font-size: 11px; line-height: 14px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; animation: income 700ms ease-out both; }
-@keyframes income { 0% { opacity: 0; transform: translateY(4px); } 15%, 62% { opacity: 1; } 100% { opacity: 0; transform: translateY(-3px); } }
+.change { position: absolute; right: 8px; height: 14px; font-size: 11px; line-height: 14px; font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; }
+.gain { top: -19px; color: #577b50; animation: income 950ms ease-out both; }
+.loss { bottom: -24px; color: #b35b4f; animation: expense 950ms ease-out both; }
+@keyframes income { 0% { opacity: 0; transform: translateY(4px); } 12%, 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-3px); } }
+@keyframes expense { 0% { opacity: 0; transform: translateY(-4px); } 12%, 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(4px); } }
 .details { position: absolute; z-index: 2; top: 72px; width: 220px; padding: 10px 12px; border: 1px solid #e1e6df; border-radius: 9px; background: #fff; box-shadow: 0 6px 18px #30433210; cursor: default; user-select: text; }
 .detailLabel { display: block; margin-bottom: 4px; color: #526052; font-size: 11px; line-height: 14px; font-weight: 400; }
 .detailValue { display: block; color: #253229; font-size: 14px; line-height: 18px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-@media (prefers-reduced-motion: reduce) { .gain { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .gain, .loss { animation: none; } }

@@ -27,13 +27,15 @@ function saveDate(value: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "旧版存档";
 }
 
-export function SettingsDialog({ game, onClose, onImport, onReset, performanceEnabled, onPerformanceChange, rebirth }: {
+export function SettingsDialog({ game, onClose, onImport, onReset, performanceEnabled, onPerformanceChange, resourceChangesEnabled, onResourceChangesChange, rebirth }: {
   game: GameState;
   onClose: () => void;
   onImport: (state: GameState) => void;
   onReset: () => void;
   performanceEnabled: boolean;
   onPerformanceChange: (enabled: boolean) => void;
+  resourceChangesEnabled: boolean;
+  onResourceChangesChange: (enabled: boolean) => void;
   rebirth?: { completed: boolean; onRebirth: () => void };
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -198,6 +200,7 @@ export function SettingsDialog({ game, onClose, onImport, onReset, performanceEn
     </>}
     {page === "foreman" && <ForemanProfile />}
     {page === "more" && <>
+      <label className={styles.row}><span>显示资源增减提示</span><input className={styles.switch} type="checkbox" role="switch" checked={resourceChangesEnabled} onChange={(event) => onResourceChangesChange(event.target.checked)} /></label>
       <label className={styles.row}><span>显示性能数据</span><input className={styles.switch} type="checkbox" role="switch" checked={performanceEnabled} onChange={(event) => onPerformanceChange(event.target.checked)} /></label>
       {row("重新开始", "reset")}
     </>}

@@ -1,3 +1,5 @@
+import type { ResourceKind } from "./resource-activity.ts";
+
 export type ZoneType = "gather" | "process" | "synthesis" | "living";
 export type ZoneId = string;
 export type Personality = "leader" | "slowBurn" | "lazy";
@@ -681,16 +683,22 @@ export function orderCoinReward(state: GameState, order: OrderState) {
   return order.reward === "special" ? Math.ceil(standardReward * 1.5) : standardReward;
 }
 
-export function stepGame(state: GameState, seconds: number, random = Math.random): GameState {
+export function stepGame(state: GameState, seconds: number, random = Math.random, onResourceChange?: (kind: ResourceKind, delta: number) => void): GameState {
   const dt = clamp(seconds, 0, 1);
   if (dt <= 0) return state;
   const inventory = { ...state.inventory, specials: { ...state.inventory.specials } };
   let coins = state.coins;
-  if (state.autoCanSupply && inventory.cans < 200 && coins >= 400) { inventory.cans += 200; coins -= 400; }
+  if (state.autoCanSupply && inventory.cans < 200 && coins >= 400) {
+    inventory.cans += 200; coins -= 400;
+    onResourceChange?.("cans", 200); onResourceChange?.("coins", -400);
+  }
   let market = { ...state.market, elapsed: state.market.elapsed + dt };
   if (market.elapsed >= 300) market = { roughPrice: randomMarketPrice(10, random), refinedPrice: randomMarketPrice(30, random), elapsed: market.elapsed % 300 };
   let schedulerSeconds = Math.max(0, state.schedulerSeconds - dt);
-  if (state.autoSchedulerSupply && schedulerSeconds < 180 && coins >= 300) { schedulerSeconds += 180; coins -= 300; }
+  if (state.autoSchedulerSupply && schedulerSeconds < 180 && coins >= 300) {
+    schedulerSeconds += 180; coins -= 300;
+    onResourceChange?.("coins", -300);
+  }
 
   const effects: TimedEffectsState = {
     canOpener: Math.max(0, state.effects.canOpener - dt),
@@ -734,6 +742,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
         const rate = recoveryRate(worker.spirit) * (effects.canOpener > 0 || state.canOpenerSeconds > 0 ? 1.5 : 1) * (guarded.has(plot.id) ? 2 : 1);
         const actualSeconds = Math.min(dt, (100 - worker.mood) / rate, inventory.cans / .01);
         inventory.cans -= .01 * actualSeconds;
+        onResourceChange?.("cans", -.01 * actualSeconds);
         worker.mood = clamp(worker.mood + rate * actualSeconds, 0, 100);
         worker.status = worker.mood >= 100 ? "ready" : "resting";
       } else worker.status = "waiting";
@@ -778,6 +787,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     if (worker.status !== "slacking") {
       const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * productionMultiplier(plot, holy);
       inventory.raw += 10 * rate * dt;
+      onResourceChange?.("raw", 10 * rate * dt);
       worker.status = worker.mood <= 0 ? "exhausted" : "gathering";
     } else if (worker.mood <= 0) worker.status = "exhausted";
   }
@@ -796,7 +806,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const group = processWorkersByPlot.get(plot.id) ?? [];
     const active = group.filter((worker) => worker.status !== "slacking");
     const recipe = RECIPES[plotState.recipe];
-    if (!plotState.batch.active && active.length && inventory.raw >= recipe.raw) { inventory.raw -= recipe.raw; plotState.batch = { active: true, progress: 0, reservedRaw: recipe.raw }; }
+    if (!plotState.batch.active && active.length && inventory.raw >= recipe.raw) {
+      inventory.raw -= recipe.raw;
+      onResourceChange?.("raw", -recipe.raw);
+      plotState.batch = { active: true, progress: 0, reservedRaw: recipe.raw };
+    }
     if (plotState.batch.active && active.length) {
       const leaders = group.filter((worker) => !isForeman(worker) && worker.personality === "leader").length;
       const holy = holyPlot(plot);
@@ -806,7 +820,12 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += 1; plotState.produced += 1;
-        if (inventory.raw >= recipe.raw) { inventory.raw -= recipe.raw; plotState.batch = { active: true, progress: overflow, reservedRaw: recipe.raw }; }
+        onResourceChange?.(plotState.recipe, 1);
+        if (inventory.raw >= recipe.raw) {
+          inventory.raw -= recipe.raw;
+          onResourceChange?.("raw", -recipe.raw);
+          plotState.batch = { active: true, progress: overflow, reservedRaw: recipe.raw };
+        }
         else plotState.batch = { active: false, progress: 0, reservedRaw: 0 };
       }
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
@@ -822,7 +841,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const canReserve = Object.entries(recipe.inputs).every(([kind, amount]) => inventory[kind as "rough" | "refined" | "screws"] >= amount);
     if (!plotState.batch.active && active.length && canReserve) {
       const reserved: SynthesisPlotState["batch"]["reserved"] = {};
-      for (const [kind, amount] of Object.entries(recipe.inputs)) { inventory[kind as "rough" | "refined" | "screws"] -= amount; reserved[kind as "rough" | "refined" | "screws"] = amount; }
+      for (const [kind, amount] of Object.entries(recipe.inputs)) {
+        inventory[kind as "rough" | "refined" | "screws"] -= amount;
+        onResourceChange?.(kind as ResourceKind, -amount);
+        reserved[kind as "rough" | "refined" | "screws"] = amount;
+      }
       plotState.batch = { active: true, progress: 0, reserved };
     }
     if (plotState.batch.active && active.length) {
@@ -834,8 +857,17 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
       plotState.batch.progress += contribution * dt / recipe.seconds;
       while (plotState.batch.progress >= 1) {
         const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += recipe.output; plotState.produced += recipe.output;
+        onResourceChange?.(plotState.recipe, recipe.output);
         const reserveAgain = Object.entries(recipe.inputs).every(([kind, amount]) => inventory[kind as "rough" | "refined" | "screws"] >= amount);
-        if (reserveAgain) { const reserved: SynthesisPlotState["batch"]["reserved"] = {}; for (const [kind, amount] of Object.entries(recipe.inputs)) { inventory[kind as "rough" | "refined" | "screws"] -= amount; reserved[kind as "rough" | "refined" | "screws"] = amount; } plotState.batch = { active: true, progress: overflow, reserved }; }
+        if (reserveAgain) {
+          const reserved: SynthesisPlotState["batch"]["reserved"] = {};
+          for (const [kind, amount] of Object.entries(recipe.inputs)) {
+            inventory[kind as "rough" | "refined" | "screws"] -= amount;
+            onResourceChange?.(kind as ResourceKind, -amount);
+            reserved[kind as "rough" | "refined" | "screws"] = amount;
+          }
+          plotState.batch = { active: true, progress: overflow, reserved };
+        }
         else plotState.batch = { active: false, progress: 0, reserved: {} };
       }
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
