@@ -155,7 +155,7 @@ for (const version of [8, 9]) {
     const raw = JSON.stringify(game);
     const states = [parseSavedState(raw), parseGameSave(raw).state];
     for (const loaded of states) {
-      assert.equal(loaded.version, 9);
+      assert.equal(loaded.version, 10);
       assert.equal(loaded.effects.holyLight.length, 1);
       const { id, ...effect } = loaded.effects.holyLight[0];
       assert.equal(typeof id, "string");

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { orderCoinReward, RECIPES, SYNTHESIS_RECIPES } from "./game-engine";
+import { getOrderProductionStatus, orderCoinReward, RECIPES, SYNTHESIS_RECIPES } from "./game-engine";
 import type { GameState, OrderState } from "./game-engine";
 import { createOrderDeliveryGate, mergeRetainedOrders } from "./order-delivery-presentation";
 import type { RetainedOrder } from "./order-delivery-presentation";
@@ -16,10 +16,19 @@ type OrderCardData = {
   available: [number, number];
   coins: number;
   phase: "live" | "pending" | "leaving";
+  tracking: boolean;
+  production: ReturnType<typeof getOrderProductionStatus> | null;
 };
 
-function OrderCard({ card, onDeliver, onFinish }: {
+function OrderCard({ card, planningUnlocked, negotiationUnlocked, canStartTracking, refreshCooldown, onTrack, onCancelTracking, onRefresh, onDeliver, onFinish }: {
   card: OrderCardData;
+  planningUnlocked: boolean;
+  negotiationUnlocked: boolean;
+  canStartTracking: boolean;
+  refreshCooldown: number;
+  onTrack: (id: string) => void;
+  onCancelTracking: () => void;
+  onRefresh: (id: string) => void;
   onDeliver: (card: OrderCardData) => void;
   onFinish: (id: string) => void;
 }) {
@@ -63,6 +72,18 @@ function OrderCard({ card, onDeliver, onFinish }: {
           </div>
         </div>;
       })}
+      {card.tracking && card.production && <div className={`${styles.planStatus} ${card.production.phase === "blocked" ? styles.blocked : ""}`}>
+        <strong>{card.production.label}</strong>
+        <span>{card.production.detail}</span>
+      </div>}
+      <div className={styles.actions}>
+        <button type="button" className={`${styles.secondaryButton} ${card.tracking ? styles.trackingButton : ""}`} disabled={phase !== "live" || !planningUnlocked || (!card.tracking && !canStartTracking)} onClick={() => card.tracking ? onCancelTracking() : onTrack(order.id)} title={!planningUnlocked ? "在研究中花费5,000金币解锁生产计划" : !card.tracking && !canStartTracking ? "请先交付或取消正在追踪的订单，并等待配方恢复" : "临时调整现有地块配方；交付或取消后恢复"}>
+          {card.tracking ? "取消追踪" : !planningUnlocked ? "追踪未解锁" : "追踪生产"}
+        </button>
+        <button type="button" className={styles.secondaryButton} disabled={phase !== "live" || !negotiationUnlocked || !!order.rerolled || refreshCooldown > 0} onClick={() => onRefresh(order.id)} title={!negotiationUnlocked ? "在研究中解锁客户协商" : "每张订单限换一次，保留奖励类型和剩余时间"}>
+          {!negotiationUnlocked ? "换单未解锁" : order.rerolled ? "已换过一次" : refreshCooldown > 0 ? `换单 ${refreshCooldown}s` : "更换订单"}
+        </button>
+      </div>
       <div className={`${styles.row} ${styles.bottom}`}>
         <span className={styles.reward}><TabletIcon name="coin" size={16} />{number.format(card.coins)} 金币</span>
         <button type="button" className={styles.deliverButton} disabled={!ready || phase !== "live"} onClick={() => onDeliver(card)}>交付</button>
@@ -73,20 +94,27 @@ function OrderCard({ card, onDeliver, onFinish }: {
   </div>;
 }
 
-export function WorkshopOrders({ game, onDeliver, onNotice }: {
+export function WorkshopOrders({ game, onTrack, onCancelTracking, onRefresh, onResearch, onDeliver, onNotice }: {
   game: GameState;
+  onTrack: (orderId: string) => void;
+  onCancelTracking: () => void;
+  onRefresh: (orderId: string) => void;
+  onResearch: () => void;
   onDeliver: (orderId: string) => boolean;
   onNotice?: (message: string) => void;
 }) {
   const titleId = useId();
   const [retained, setRetained] = useState<RetainedOrder<OrderCardData>[]>([]);
   const [deliveryGate] = useState(createOrderDeliveryGate);
+  const productionStatus = getOrderProductionStatus(game);
   const cards = mergeRetainedOrders(game.orders.map((order): OrderCardData => ({
     id: order.id,
     order,
     available: [game.inventory[order.processed.kind], game.inventory[order.synthesized.kind]],
     coins: orderCoinReward(game, order),
     phase: "live",
+    tracking: game.productionPlan?.orderId === order.id && game.productionPlan.phase === "tracking",
+    production: game.productionPlan?.orderId === order.id ? productionStatus : null,
   })), retained);
   const finish = useCallback((id: string) => {
     setRetained((current) => current.filter(({ value }) => value.id !== id));
@@ -128,8 +156,11 @@ export function WorkshopOrders({ game, onDeliver, onNotice }: {
   return <section className={styles.page} aria-labelledby={titleId}>
     <h2 className={styles.heading} id={titleId}>工厂订单</h2>
     <div className={styles.dispatch}>{dispatch}</div>
+    {game.research.planning === 0 && <p className={styles.researchHint}>研究生产计划后，可以让地块临时转产订单物品。<button type="button" onClick={onResearch}>去研究</button></p>}
+    {game.research.planning > 0 && <p className={styles.productionHint}>同时追踪一张订单，交付、取消或过期后恢复原配方。手动修改配方会让该地块退出计划。</p>}
+    {productionStatus.phase === "restoring" && <div className={styles.restoring}><strong>{productionStatus.label}</strong><span>{productionStatus.detail}</span></div>}
     <div className={styles.stack}>
-      {cards.length ? cards.map((card) => <OrderCard key={card.id} card={card} onDeliver={deliver} onFinish={finish} />)
+      {cards.length ? cards.map((card) => <OrderCard key={card.id} card={card} planningUnlocked={game.research.planning > 0} negotiationUnlocked={game.research.negotiation > 0} canStartTracking={!game.productionPlan} refreshCooldown={Math.max(0, Math.ceil(game.orderRefreshCooldown))} onTrack={onTrack} onCancelTracking={onCancelTracking} onRefresh={onRefresh} onDeliver={deliver} onFinish={finish} />)
         : <div className={styles.empty}>暂无订单</div>}
     </div>
   </section>;

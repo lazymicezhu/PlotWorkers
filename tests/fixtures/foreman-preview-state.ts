@@ -85,6 +85,6 @@ export function createForemanPreviewState(): GameState {
       { efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } },
     ],
     schedulerServiceUnlocked: true,
-    research: { synthesis: 1, orders: 0 },
+    research: { ...state.research, synthesis: 1, orders: 0 },
   };
 }

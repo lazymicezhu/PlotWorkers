@@ -26,7 +26,7 @@ Drag an empty part of the scene to move the camera. Use the mouse wheel or the `
 
 Building a synthesis plot unlocks orders. A new order arrives every 180 seconds, with up to two active at once; deliver the required products manually to receive its displayed rewards. Regular coin orders make up 75% of orders. The other 25% are special orders, which award 1.5 times the regular coin reward for the same products (rounded up), plus one random special item. Both order types calculate coins using market prices and research levels at delivery. Use special items from the backpack when needed.
 
-Permanent research includes Synthesis Engineering (+15% synthesis speed per level) and Order Network (+10% of the base order coin reward per level for both order types), each with five levels.
+Research has three groups: Production, Automation, and Commerce. Gathering Tools and Processing Improvements add 10% speed per level, Synthesis Engineering adds 15%, and Order Network adds 10% of the base coin reward; each has five levels. Team Management (3,000 coins) unlocks per-robot upgrades. Production Planning (5,000 coins) tracks one order, temporarily schedules recipes and upstream ingredients, then restores prior recipes after delivery or cancellation. Customer Negotiation unlocks order replacement; Delivery Assurance extends new deadlines. All research resets on rebirth.
 
 ## Local development
 
@@ -95,6 +95,8 @@ If a fully static edition is needed, follow Cloudflare's [Next.js static export 
 - Local environment files, deployment state, logs, and credentials are excluded from Git.
 
 ### Save compatibility
+
+Save version 10 adds research investment history, replacement cooldowns, and persistent order production plans. Versions 1–9 migrate automatically, retaining old research levels and historical purchase value. Saves with existing robot parameter upgrades receive Team Management at no extra cost.
 
 Save version 8 removes the environment system: resource zones, meteor strikes, crater drops, plot damage, worker injuries, and their related research. Saves from versions 1–7 upgrade automatically when loaded, restoring damaged plots and returning injured workers to full mood.
 

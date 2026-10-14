@@ -1,5 +1,5 @@
-import { RECIPES, RESEARCH, SCHEDULER_EFFICIENCY_MAX, SCHEDULER_EFFICIENCY_STEP, SYNTHESIS_SELL_PRICES, schedulerBotPrice, workerPurchasePrice } from "./game-engine.ts";
-import type { GameState, ResearchId } from "./game-engine.ts";
+import { RECIPES, SCHEDULER_EFFICIENCY_MAX, SCHEDULER_EFFICIENCY_STEP, SYNTHESIS_SELL_PRICES, schedulerBotPrice, workerPurchasePrice } from "./game-engine.ts";
+import type { GameState } from "./game-engine.ts";
 
 export type SaveValuationItem = {
   id: "coins" | "inventory" | "workers" | "plots" | "robots" | "upgrades" | "schedulerTime";
@@ -8,7 +8,7 @@ export type SaveValuationItem = {
 };
 
 export type SaveValuation = {
-  version: 2;
+  version: 3;
   total: number;
   items: SaveValuationItem[];
   note: string;
@@ -59,9 +59,8 @@ export function saveValuation(state: GameState): SaveValuation {
     const intervalLevels = Math.min(29, Math.round(nonnegative(3 - robot.intervalSeconds) * 10));
     return sum + base + (efficiencyLevels + intervalLevels) * 100;
   }, 0);
-  const research = (Object.keys(RESEARCH) as ResearchId[]).reduce((sum, id) =>
-    sum + RESEARCH[id].costs.slice(0, Math.max(0, Math.floor(state.research[id])))
-      .reduce((subtotal, cost) => subtotal + cost, 0), 0);
+  // Keep the actual investment: repricing research must not erase old assets.
+  const research = nonnegative(state.researchInvestment);
   const upgrades = research + (state.autoCanSupply ? 5000 : 0) + (state.autoSchedulerSupply ? 5000 : 0);
   const exactItems: SaveValuationItem[] = [
     { id: "coins", label: "持有金币", value: nonnegative(state.coins) },
@@ -69,7 +68,7 @@ export function saveValuation(state: GameState): SaveValuation {
     { id: "workers", label: "人物", value: workers },
     { id: "plots", label: "地块", value: plots },
     { id: "robots", label: "机器人及升级", value: robots },
-    { id: "upgrades", label: "永久研究与自动补给", value: upgrades },
+    { id: "upgrades", label: "本轮研究与自动补给", value: upgrades },
     { id: "schedulerTime", label: "剩余调度时间", value: nonnegative(state.schedulerSeconds) * 100 / 60 },
   ];
   // Imported saves are validated separately. This also keeps the reusable value
@@ -89,7 +88,7 @@ export function saveValuation(state: GameState): SaveValuation {
   for (let index = 0; index < remainingCoins; index += 1) items[remainderOrder[index].index].value += 1;
 
   return {
-    version: 2,
+    version: 3,
     total,
     items,
     note: "库存按固定基准价估算，包含生产中已预扣的材料；特殊物品暂未折价。",

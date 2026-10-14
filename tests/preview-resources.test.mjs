@@ -78,6 +78,7 @@ test("replenishment preserves larger balances and stable references once full", 
 
 test("infinite resources do not bypass robot efficiency caps", () => {
   let game = replenishPreviewResources(createInitialState(0, 0));
+  game.research.management = 1;
   for (let index = 0; index < 40; index++) game = replenishPreviewResources(upgradeSchedulerEfficiency(game, 0));
   assert.equal(game.schedulerRobots[0].efficiency, SCHEDULER_EFFICIENCY_MAX);
   assert.equal(upgradeSchedulerEfficiency(game, 0), game);

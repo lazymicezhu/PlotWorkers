@@ -295,12 +295,14 @@ test("stored can opener boosts only living recovery for 120 seconds", () => {
 
 test("each scheduler robot can upgrade speed and interval independently", () => {
   const efficiencyGame = buySchedulerBot({ ...state(), coins: 1000 });
+  efficiencyGame.research.management = 1;
   efficiencyGame.coins = 100;
   const faster = upgradeSchedulerEfficiency(efficiencyGame, 0);
   assert.equal(faster.coins, 0);
   assert.equal(faster.schedulerRobots[0].efficiency, 1.02);
   assert.equal(faster.schedulerRobots[1].efficiency, 1);
   const intervalGame = buySchedulerBot({ ...state(), coins: 1000 });
+  intervalGame.research.management = 1;
   intervalGame.coins = 100;
   const shorter = upgradeSchedulerInterval(intervalGame, 0);
   assert.equal(shorter.coins, 0);
@@ -309,6 +311,7 @@ test("each scheduler robot can upgrade speed and interval independently", () => 
 
 test("scheduler efficiency reaches 150 percent in 25 upgrades and stops charging", () => {
   let game = { ...state(), coins: 10_000 };
+  game.research.management = 1;
   for (let level = 1; level <= 25; level += 1) {
     game = upgradeSchedulerEfficiency(game, 0);
     assert.equal(game.schedulerRobots[0].efficiency, (100 + level * 2) / 100);
@@ -319,6 +322,7 @@ test("scheduler efficiency reaches 150 percent in 25 upgrades and stops charging
 
 test("scheduler efficiency clamps the last legacy odd-percent upgrade and rejects unavailable upgrades", () => {
   const game = state();
+  game.research.management = 1;
   game.schedulerRobots[0].efficiency = 1.49;
   const capped = upgradeSchedulerEfficiency(game, 0);
   assert.equal(capped.schedulerRobots[0].efficiency, 1.5);
@@ -502,7 +506,7 @@ test("version one saves migrate plots, automation and movement state", async () 
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 9);
+  assert.equal(migrated.version, 10);
   assert.equal(migrated.plots.length, 3);
   assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
@@ -522,7 +526,7 @@ test("version one saves migrate plots, automation and movement state", async () 
 
 test("new games and elapsed simulation contain no environment system", () => {
   let game = state();
-  assert.equal(game.version, 9);
+  assert.equal(game.version, 10);
   assert.equal("environment" in game, false);
   assert.ok(game.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
   assert.ok(game.workers.every((worker) => !("recoveryRemaining" in worker)));
@@ -579,7 +583,7 @@ test("version seven saves remove environmental damage and resume existing produc
   old.processPlots.process = { recipe: "rough", produced: 7, batch: { active: true, progress: .95, reservedRaw: 75 } };
 
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 9);
+  assert.equal(migrated.version, 10);
   assert.equal("environment" in migrated, false);
   assert.ok(migrated.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
   assert.ok(migrated.workers.every((worker) => !("recoveryRemaining" in worker)));
@@ -587,7 +591,7 @@ test("version seven saves remove environmental damage and resume existing produc
   assert.deepEqual(migrated.workers.map((worker) => worker.mood), [100, 100, 100, 100]);
   assert.equal(migrated.coins, old.coins);
   assert.deepEqual(migrated.inventory, old.inventory);
-  assert.deepEqual(migrated.research, { synthesis: 2, orders: 1 });
+  assert.deepEqual(migrated.research, { ...state().research, synthesis: 2, orders: 1 });
   assert.deepEqual(migrated.processPlots, old.processPlots);
 
   const next = stepGame(migrated, 1, () => 0);
@@ -1021,8 +1025,8 @@ test("expansion prices and permanent research scale without decreasing", () => {
   assert.equal(schedulerBotPrice(game), 4800);
   game.schedulerBots = 11;
   assert.equal(schedulerBotPrice(game), 11500);
-  assert.deepEqual(Object.keys(RESEARCH), ["synthesis", "orders"]);
-  game.coins = 50_000;
+  assert.deepEqual(Object.keys(RESEARCH), ["gather", "process", "synthesis", "management", "planning", "orders", "negotiation", "delivery"]);
+  game.coins = RESEARCH.synthesis.costs[0];
   const researched = buyResearch(game, "synthesis");
   assert.equal(researched.coins, 0);
   assert.equal(researched.research.synthesis, 1);

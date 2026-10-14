@@ -1,0 +1,36 @@
+.page { color:#2d3631; font:inherit; font-size:12px; line-height:1.5; }
+.page * { box-sizing:border-box; }
+.page .heading { margin:0 0 8px; font-size:21px; font-weight:650; letter-spacing:-.7px; line-height:1.4; }
+.page .note { margin:0 0 25px; color:#8a938c; font-size:10px; line-height:1.7; }
+.group + .group { margin-top:27px; }
+.page .group h3 { margin:0 0 4px; color:#53684d; font-size:13px; font-weight:650; }
+.page .description { margin:0 0 12px; color:#8a938c; font-size:10px; line-height:1.6; }
+.cards { display:grid; gap:12px; }
+.card { min-width:0; padding:16px 17px; border:1px solid #e5e9df; border-radius:12px; background:#fff; }
+.cardTop { display:flex; align-items:center; gap:9px; }
+.icon { display:flex; color:#849477; }
+.page .card h4 { margin:0; color:#475941; font-size:12px; font-weight:600; }
+.level { margin-left:auto; white-space:nowrap; color:#8a938c; font-size:10px; font-variant-numeric:tabular-nums; }
+.steps { display:flex; gap:4px; margin:12px 0; }
+.steps i { flex:1; height:3px; background:#edf1e9; border-radius:3px; }
+.steps .filled { background:#9eaf8e; }
+.page .effect { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px 7px; margin:0; font-size:11px; }
+.current { color:#929b8b; }
+.arrow { color:#a5af9a; }
+.effect strong { color:#596e51; font-weight:600; }
+.complete .current { color:#596e51; }
+.page .detail { margin:8px 0 14px; color:#939c8c; font-size:10px; line-height:1.7; }
+.cardBottom { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.state { font-size:10px; color:#909c87; }
+.insufficient { color:#a1937e; }
+.cardBottom button { display:flex; align-items:center; justify-content:center; flex-shrink:0; gap:5px; min-height:32px; padding:7px 10px; border:0; border-radius:7px; background:#667d5b; color:#fff; font:inherit; font-size:11px; font-variant-numeric:tabular-nums; cursor:pointer; }
+.cardBottom button > span { margin-left:3px; font-size:10px; color:#e6ecdf; }
+.cardBottom button:hover:not(:disabled) { background:#586e4e; }
+.page .cardBottom button:disabled { opacity:1; background:#e9eee3; color:#8b977e; cursor:default; }
+.cardBottom button:disabled > span { color:inherit; }
+.cardBottom button:focus-visible { outline:2px solid #7d946f; outline-offset:3px; }
+@container (max-width:380px) {
+  .page .heading { font-size:18px; }
+  .card { padding:14px 13px; }
+  .cardBottom { flex-wrap:wrap; }
+}

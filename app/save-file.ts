@@ -1,4 +1,4 @@
-import { SCHEDULER_EFFICIENCY_MAX, orderCoinReward, parseSavedState } from "./game-engine.ts";
+import { RESEARCH, SCHEDULER_EFFICIENCY_MAX, orderCoinReward, parseSavedState } from "./game-engine.ts";
 import type { GameState } from "./game-engine.ts";
 
 export const MAX_SAVE_FILE_BYTES = 5 * 1024 * 1024;
@@ -63,6 +63,34 @@ function checkHolyLights(value: unknown) {
     if (holyLightIds.has(holyLightId)) invalid("重复圣光编号");
     holyLightIds.add(holyLightId);
   }
+}
+
+function checkProductionPlan(value: unknown, state?: GameState) {
+  if (value === null) return;
+  const plan = object(value, "生产计划");
+  const orderId = id(plan.orderId, "追踪订单编号");
+  choice(plan.phase, ["tracking", "restoring"], "生产计划状态");
+  const managed = new Set<string>();
+  for (const [key, recipes, type] of [
+    ["process", ["rough", "refined"], "process"],
+    ["synthesis", ["cans", "screws", "rebar"], "synthesis"],
+  ] as const) {
+    for (const [plotId, recipe] of Object.entries(object(plan[key], "原生产配方"))) {
+      id(plotId, "托管地块编号");
+      choice(recipe, recipes, "原生产配方");
+      if (managed.has(plotId)) invalid("重复托管地块");
+      managed.add(plotId);
+      if (state && !state.plots.some((plot) => plot.id === plotId && plot.type === type)) invalid("托管地块引用");
+    }
+  }
+  const paused = new Set<string>();
+  for (const plotId of list(plan.pausedPlotIds, "暂停生产地块")) {
+    const key = id(plotId, "暂停生产地块编号");
+    if (!managed.has(key) || paused.has(key)) invalid("暂停生产地块引用");
+    paused.add(key);
+  }
+  if (state && state.research.planning < 1) invalid("生产计划研究");
+  if (state && plan.phase === "tracking" && !state.orders.some((order) => order.id === orderId)) invalid("追踪订单引用");
 }
 
 // The legacy migrator allocates schedulerBots entries. Bound untrusted input
@@ -154,7 +182,11 @@ function checkState(state: GameState) {
     for (const key of ["rest", "work", "wake"]) boolean(duties[key], `机器人职责.${key}`);
   }
   for (const key of ["autoCanSupply", "autoSchedulerSupply", "schedulerServiceUnlocked"] as const) boolean(state[key], key);
-  for (const key of ["synthesis", "orders"] as const) number(state.research[key], `研究.${key}`, 0, 5, true);
+  const research = object(state.research, "研究");
+  for (const [key, info] of Object.entries(RESEARCH)) number(research[key], `研究.${key}`, 0, info.costs.length, true);
+  number(state.researchInvestment, "研究投入");
+  number(state.orderRefreshCooldown, "换单冷却", 0, 300);
+  checkProductionPlan(state.productionPlan, state);
   for (const key of ZONE_TYPES) number(object(state.plotPurchases, "地块购买记录")[key], "地块购买次数", 0, Number.MAX_SAFE_INTEGER, true);
   const effects = object(state.effects, "道具效果");
   number(effects.canOpener, "罐头起子时间");
@@ -174,6 +206,7 @@ function checkState(state: GameState) {
     number(processed.amount, "订单加工品数量", 1, Number.MAX_SAFE_INTEGER, true);
     number(synthesized.amount, "订单合成品数量", 1, Number.MAX_SAFE_INTEGER, true);
     choice(order.reward, ["coins", "special"], "订单奖励");
+    if (order.rerolled !== undefined) boolean(order.rerolled, "订单已换单");
     if (!Number.isFinite(orderCoinReward(state, order))) invalid("订单奖励金额");
   }
 }
@@ -196,8 +229,12 @@ function checkProvidedValues(raw: ObjectValue) {
   for (const key of ["autoCanSupply", "autoSchedulerSupply", "schedulerServiceUnlocked"]) if (raw[key] !== undefined) boolean(raw[key], key);
   if (raw.research !== undefined) {
     const research = object(raw.research, "研究");
-    for (const key of ["synthesis", "orders"]) if (research[key] !== undefined) number(research[key], `研究.${key}`, 0, 5, true);
+    for (const [key, info] of Object.entries(RESEARCH)) if (research[key] !== undefined || Number(raw.version) >= 10) number(research[key], `研究.${key}`, 0, info.costs.length, true);
   }
+  if (raw.researchInvestment !== undefined || Number(raw.version) >= 10) number(raw.researchInvestment, "研究投入");
+  if (raw.orderRefreshCooldown !== undefined || Number(raw.version) >= 10) number(raw.orderRefreshCooldown, "换单冷却", 0, 300);
+  if (raw.productionPlan !== undefined || Number(raw.version) >= 10) checkProductionPlan(raw.productionPlan);
+  if (Number(raw.version) >= 10) object(raw.research, "研究");
   if (raw.schedulerRobots !== undefined) {
     const robots = list(raw.schedulerRobots, "机器人");
     if (raw.schedulerBots !== undefined && robots.length !== raw.schedulerBots) invalid("机器人数量");
@@ -219,6 +256,7 @@ function checkProvidedValues(raw: ObjectValue) {
       id(order.id, "订单编号");
       number(order.remaining, "订单时间");
       choice(order.reward, ["coins", "special"], "订单奖励");
+      if (order.rerolled !== undefined) boolean(order.rerolled, "订单已换单");
       const processed = object(order.processed, "订单加工品");
       const synthesized = object(order.synthesized, "订单合成品");
       choice(processed.kind, ["rough", "refined"], "订单加工品类型");
@@ -231,10 +269,10 @@ function checkProvidedValues(raw: ObjectValue) {
 
 function normalizeState(source: unknown): GameState {
   const raw = object(source, "游戏数据");
-  if (typeof raw.version === "number" && raw.version > 9) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
-  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 9) invalid("存档版本");
+  if (typeof raw.version === "number" && raw.version > 10) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
+  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 10) invalid("存档版本");
   checkInputBounds(raw);
-  if (raw.version === 9 || raw.rebirthCount !== undefined) number(raw.rebirthCount, "转生次数", 0, 1, true);
+  if (Number(raw.version) >= 9 || raw.rebirthCount !== undefined) number(raw.rebirthCount, "转生次数", 0, 1, true);
   if (raw.schedulerBots !== undefined) number(raw.schedulerBots, "机器人数量", 1, MAX_COLLECTION_SIZE, true);
   const state = parseSavedState(JSON.stringify(raw));
   if (!state) invalid("游戏数据");
@@ -243,6 +281,7 @@ function normalizeState(source: unknown): GameState {
   if (typeof state.inventory.cans === "number" && state.inventory.cans < 0 && state.inventory.cans >= -1e-12) state.inventory.cans = 0;
   checkState(state);
   checkProvidedValues(raw);
+  if (raw.productionPlan !== undefined) checkProductionPlan(raw.productionPlan, state);
   // Migration supplies fields introduced in later versions. Existing production
   // data must still be valid: a misspelled recipe must not silently become rough.
   for (const [key, synthesis] of [["processPlots", false], ["synthesisPlots", true]] as const) {

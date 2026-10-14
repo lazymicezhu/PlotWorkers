@@ -46,6 +46,7 @@ import {
   buyScheduler,
   buySchedulerBot,
   buyWorker,
+  cancelOrderTracking,
   changeRecipe,
   changeSynthesisRecipe,
   circleHitsPlot,
@@ -57,9 +58,11 @@ import {
   parseSavedState,
   placeHolyLight,
   recyclePlot,
+  refreshOrder,
   schedulerBotPrice,
   sellProducts,
   submitOrder,
+  startOrderTracking,
   togglePlotEnabled,
   toggleSchedulerDuty,
   upgradeSchedulerEfficiency,
@@ -98,6 +101,8 @@ import { createGameView, resourceActivityBetween, updateGameView } from "./resou
 import { WorkshopTablet, type TabletPage } from "./workshop-tablet";
 import { TabletIcon } from "./tablet-icon";
 import { WorkshopOrders } from "./workshop-orders";
+import { WorkshopResearch } from "./workshop-research";
+import managementStyles from "./workshop-management.module.css";
 import { useButtonFeedback } from "./use-button-feedback";
 import { isInfiniteResourcePreview, previewStorageKey, replenishPreviewResources } from "./preview-resources";
 import { snapshotTabletNotifications, reconcileTabletNotifications, type TabletNotificationSnapshot } from "./tablet-notifications";
@@ -847,17 +852,41 @@ export default function PlotWorkersGame() {
     });
   }
 
-  function deliverTabletOrder(orderId: string) {
-    // Read the latest committed simulation before choosing a random order reward.
+  function transactTabletGame(action: (current: GameState) => GameState) {
+    // Read the latest committed simulation before purchasing or changing an order.
     // The transaction stays outside React updaters, which may be replayed.
     flushSync(() => {});
     const current = gameRef.current;
-    const next = submitOrder(current, orderId);
+    const next = action(current);
     if (next === current) return false;
     gameRef.current = next;
     flushSync(() => setGame(next));
     persistGame(next);
     return true;
+  }
+
+  function deliverTabletOrder(orderId: string) {
+    return transactTabletGame((current) => submitOrder(current, orderId));
+  }
+
+  function upgradeTabletResearch(id: ResearchId) {
+    const success = transactTabletGame((current) => buyResearch(current, id));
+    setNotice(success ? `${RESEARCH[id].name}${RESEARCH[id].costs.length === 1 ? "已解锁" : "已升级"}` : "金币不足或研究已完成");
+  }
+
+  function trackTabletOrder(orderId: string) {
+    const success = transactTabletGame((current) => startOrderTracking(current, orderId));
+    setNotice(success ? "已追踪订单，地块将在当前批次结束后按需转产" : "暂时无法追踪，请先解锁生产计划并等待上一项计划结束");
+  }
+
+  function cancelTabletOrderTracking() {
+    const success = transactTabletGame(cancelOrderTracking);
+    setNotice(success ? "已取消追踪，地块将在当前批次结束后恢复原配方" : "当前没有正在追踪的订单");
+  }
+
+  function refreshTabletOrder(orderId: string) {
+    const success = transactTabletGame((current) => refreshOrder(current, orderId));
+    setNotice(success ? "已更换订单，奖励类型和剩余时间保持不变" : "暂时无法换单，请检查研究、冷却和换单次数");
   }
 
   function positionInWorld(clientX: number, clientY: number) {
@@ -1638,8 +1667,8 @@ export default function PlotWorkersGame() {
         </>}
         {panel === "inventory" && <><h2>特殊物品背包</h2>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><i className="tablet-item-icon"><TabletIcon name={id === "canOpener" ? "can" : id === "smartLeader" ? "robot" : "bolt"} size={21} /></i><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{infiniteResources ? "∞" : game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 可同时放置多个，每处独立60秒，重叠不叠加"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {activeHolyLights.length}处{activeHolyLights.length > 0 && `（${activeHolyLights.map((effect) => `${Math.ceil(effect.remaining)}s`).join(" / ")}）`}</div></>}
         {panel === "orders" && !game.plots.some((plot) => plot.type === "synthesis") && <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="orders" size={44} /></span><h2>第一张订单，等你开工</h2><p>建造一块合成区，就能开始接收工厂订单。</p><button className="primary-action" onClick={() => { setTabletPage("shop"); setBuilderType("synthesis"); setPanel("plotBuilder"); }}>建造合成区</button></div>}
-        {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onDeliver={deliverTabletOrder} onNotice={setNotice} />}
-        {panel === "research" && <><h2>研究</h2>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><i className="tablet-item-icon"><TabletIcon name="research" size={21} /></i><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高订单金币奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
+        {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onTrack={trackTabletOrder} onCancelTracking={cancelTabletOrderTracking} onRefresh={refreshTabletOrder} onResearch={() => selectTabletPage("research")} onDeliver={deliverTabletOrder} onNotice={setNotice} />}
+        {panel === "research" && <WorkshopResearch game={game} onUpgrade={upgradeTabletResearch} />}
   </>;
 
   return (
@@ -1739,7 +1768,7 @@ export default function PlotWorkersGame() {
 
       <WorkshopTablet infiniteResources={infiniteResources} open={tabletOpen} activePage={tabletPage} onOpenChange={changeTabletOpen} onPageChange={selectTabletPage} unreadPages={tabletUnread} notificationVersion={tabletNotificationVersion} coins={game.coins} workerCount={game.workers.length}>
         {tabletPage === "workers" || tabletPage === "plots" || (tabletPage === "robots" && game.schedulerServiceUnlocked) ?
-          <WorkerManager infiniteResources={infiniteResources} key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
+          <WorkerManager infiniteResources={infiniteResources} key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} upgradesUnlocked={game.research.management > 0} onResearch={() => selectTabletPage("research")} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
           <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="robot" size={44} /></span><h2>让机器人搭把手</h2><p>开启自动调度服务，让机器人帮忙安排工作、休息和唤醒摸鱼的小人。</p><button className="primary-action" onClick={() => selectTabletPage("shop")}>去商店看看</button></div> :
           <div className="tablet-business-content" data-page={panel}>
             {panel === "plotBuilder" && <button className="tablet-back" onClick={() => setPanel("shop")}>← 返回商店</button>}
@@ -1784,7 +1813,7 @@ function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { worke
   </div>;
 }
 
-function WorkerManager({ infiniteResources = false, workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, schedulerSeconds, showRobots, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
+function WorkerManager({ infiniteResources = false, workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, schedulerSeconds, showRobots, upgradesUnlocked, onResearch, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
   workers: WorkerState[];
   plots: PlotState[];
   processPlots: GameState["processPlots"];
@@ -1798,6 +1827,8 @@ function WorkerManager({ infiniteResources = false, workers, plots, processPlots
   infiniteResources?: boolean;
   schedulerSeconds: number;
   showRobots: boolean;
+  upgradesUnlocked: boolean;
+  onResearch: () => void;
   onSelect: (worker: WorkerState) => void;
   onToggle: (section: "workers" | "robots" | "plots") => void;
   onTogglePlot: (plotId: ZoneId) => void;
@@ -1819,7 +1850,15 @@ function WorkerManager({ infiniteResources = false, workers, plots, processPlots
     </section>
     {showRobots && <section className={`manager-section robot-section ${robotsOpen ? "is-open" : ""}`}>
       <div className="manager-head"><div><h2>机器人管理</h2><p>{robots.length} 台 · 调度服务剩余 {infiniteResources ? "∞" : formatClock(schedulerSeconds)}</p></div><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>
-      {robotsOpen && <div className="robot-management">{robots.map((robot, index) => <div className="robot-upgrade" key={index}><div><strong>机器人 {index + 1}</strong><span>效率 {Math.round(robot.efficiency * 100)}% · 间隔 {robot.intervalSeconds.toFixed(1)}s</span></div><fieldset className="robot-duties"><legend>分配职责</legend>{([['rest','送去休息'],['work','送去工作'],['wake','唤醒摸鱼']] as [SchedulerDuty,string][]).map(([duty, label]) => <label key={duty}><input type="checkbox" checked={robot.duties[duty]} onChange={() => onToggleDuty(index, duty)} /><span>{label}</span></label>)}</fieldset><button disabled={coins < 100 || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX} onClick={() => onUpgradeEfficiency(index)}>{robot.efficiency >= SCHEDULER_EFFICIENCY_MAX ? "效率已满" : `效率 +${Math.round(SCHEDULER_EFFICIENCY_STEP * 100)}%`}{robot.efficiency < SCHEDULER_EFFICIENCY_MAX && <small>100金币</small>}</button><button disabled={coins < 100 || robot.intervalSeconds <= .1} onClick={() => onUpgradeInterval(index)}>间隔 −0.1s<small>100金币</small></button></div>)}</div>}
+      {robotsOpen && <>
+        {!upgradesUnlocked && <div className={managementStyles.unlockPrompt}><p><strong>研究班组管理，开放机器人参数升级</strong>一次性花费3,000金币解锁，每台机器人仍可独立升级。</p><button type="button" onClick={onResearch}>去研究</button></div>}
+        <div className="robot-management">{robots.map((robot, index) => <div className="robot-upgrade" key={index}>
+          <div><strong>机器人 {index + 1}</strong><span>效率 {Math.round(robot.efficiency * 100)}% · 间隔 {robot.intervalSeconds.toFixed(1)}s</span></div>
+          <fieldset className="robot-duties"><legend>分配职责</legend>{([['rest','送去休息'],['work','送去工作'],['wake','唤醒摸鱼']] as [SchedulerDuty,string][]).map(([duty, label]) => <label key={duty}><input type="checkbox" checked={robot.duties[duty]} onChange={() => onToggleDuty(index, duty)} /><span>{label}</span></label>)}</fieldset>
+          <button disabled={!upgradesUnlocked || coins < 100 || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX} title={!upgradesUnlocked ? "先在研究中解锁班组管理" : undefined} onClick={() => onUpgradeEfficiency(index)}>{robot.efficiency >= SCHEDULER_EFFICIENCY_MAX ? "效率已满" : `效率 +${Math.round(SCHEDULER_EFFICIENCY_STEP * 100)}%`}{robot.efficiency < SCHEDULER_EFFICIENCY_MAX && <small>{upgradesUnlocked ? "100金币" : "研究后解锁"}</small>}</button>
+          <button disabled={!upgradesUnlocked || coins < 100 || robot.intervalSeconds <= .1} title={!upgradesUnlocked ? "先在研究中解锁班组管理" : undefined} onClick={() => onUpgradeInterval(index)}>{robot.intervalSeconds <= .1 ? "间隔已满" : <>间隔 −0.1s<small>{upgradesUnlocked ? "100金币" : "研究后解锁"}</small></>}</button>
+        </div>)}</div>
+      </>}
     </section>}
     <section className={`manager-section plot-manager-section ${plotsOpen ? "is-open" : ""}`}>
       <div className="manager-head"><div><h2>地块管理</h2><p>{plots.filter((plot) => plot.enabled !== false).length} 块启用 · {plots.length} 块地块</p></div><button className="manager-toggle" onClick={() => onToggle("plots")} aria-label={plotsOpen ? "缩小地块管理" : "展开地块管理"}>{plotsOpen ? "缩小" : "展开"}</button></div>

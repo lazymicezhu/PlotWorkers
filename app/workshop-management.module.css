@@ -1,0 +1,6 @@
+.unlockPrompt { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 14px; padding:13px 14px; border:1px solid #e4e9db; border-radius:10px; background:#f3f6ec; }
+.unlockPrompt p { margin:0; color:#829175; font-size:10px; line-height:1.7; }
+.unlockPrompt strong { display:block; margin-bottom:3px; color:#617852; font-size:11px; font-weight:600; }
+.unlockPrompt button { flex-shrink:0; padding:7px 10px; border:0; border-radius:6px; color:#667d5b; background:#e5ecda; font:inherit; font-size:10px; cursor:pointer; }
+.unlockPrompt button:hover { background:#dce7cf; }
+.unlockPrompt button:focus-visible { outline:2px solid #7d946f; outline-offset:3px; }

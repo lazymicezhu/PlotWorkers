@@ -9,6 +9,7 @@ const parse = (state) => parseGameSave(JSON.stringify(state)).state;
 function advancedSave() {
   let game = initial();
   game.coins = 200_000;
+  game = buyResearch(game, "management");
   game = upgradeSchedulerEfficiency(game, 0);
   game = buyResearch(game, "synthesis");
   game.inventory = { ...game.inventory, raw: 5432, rough: 99, refined: 51, screws: 24, rebar: 12, specials: { canOpener: 1, smartLeader: 2, holyLight: 3 } };
@@ -100,7 +101,7 @@ test("bare legacy version 1 migrates original recipe, batch and retired injury",
   delete legacy.plotPurchases;
   const { state, exportedAt } = parseGameSave(JSON.stringify(legacy));
   assert.equal(exportedAt, null);
-  assert.equal(state.version, 9);
+  assert.equal(state.version, 10);
   assert.equal(state.processPlots.process.recipe, "refined");
   assert.deepEqual(state.processPlots.process.batch, legacy.batch);
   assert.equal(state.workers[0].status, "ready");
@@ -109,11 +110,11 @@ test("bare legacy version 1 migrates original recipe, batch and retired injury",
 });
 
 test("all supported bare save versions can be loaded", () => {
-  for (let version = 1; version <= 9; version++) {
+  for (let version = 1; version <= 10; version++) {
     const game = initial();
     game.version = version;
     if (version < 3) game.batch = { active: false, progress: 0, reservedRaw: 0 };
-    assert.equal(parse(game).version, 9);
+    assert.equal(parse(game).version, 10);
   }
 });
 
@@ -127,7 +128,7 @@ test("malformed JSON, unrelated packages and future formats are rejected with pl
   for (const value of ["", "not json", "{broken", "null", "[]"]) assert.throws(() => parseGameSave(value), /存档|JSON/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "another-game" })), /不是 Plot Workers/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "plot-workers-save", formatVersion: 2 })), /版本/);
-  assert.throws(() => parse({ ...initial(), version: 10 }), /较新版本/);
+  assert.throws(() => parse({ ...initial(), version: 11 }), /较新版本/);
 });
 
 test("oversize files and robot allocation attacks are rejected before migration", () => {
@@ -200,4 +201,42 @@ test("UTF-8 byte limits and optional BOM are handled consistently", () => {
   const file = exportGameSave(initial());
   assert.deepEqual(parseGameSave(`\uFEFF${file}`).state, initial());
   assert.throws(() => parseGameSave("中".repeat(Math.ceil(MAX_SAVE_FILE_BYTES / 3))), /5 MB/);
+});
+
+test("version ten keeps tracked and restoring recipe snapshots across file round trips", () => {
+  const game = advancedSave();
+  game.research.planning = 1;
+  game.researchInvestment += 5000;
+  game.orderRefreshCooldown = 123;
+  game.orders[0].rerolled = true;
+  game.productionPlan = {
+    orderId: "order-1", phase: "tracking",
+    process: { process: "rough" }, synthesis: { "synthesis-1": "cans" }, pausedPlotIds: [],
+  };
+  assert.deepEqual(parseGameSave(exportGameSave(game)).state, game);
+  game.orders = [];
+  game.productionPlan.phase = "restoring";
+  assert.deepEqual(parseGameSave(exportGameSave(game)).state, game);
+});
+
+test("new research, cooldown and plan fields reject malformed imports", () => {
+  for (const corrupt of [
+    game => { game.research.management = 2; },
+    game => { game.research.negotiation = 4; },
+    game => { game.research.gather = 1.5; },
+    game => { delete game.research.planning; },
+    game => { game.researchInvestment = -1; },
+    game => { delete game.researchInvestment; },
+    game => { game.orderRefreshCooldown = 301; },
+    game => { game.orders[0].rerolled = "yes"; },
+    game => { game.productionPlan = { orderId: "order-1", phase: "tracking", process: { missing: "rough" }, synthesis: {}, pausedPlotIds: [] }; },
+    game => { game.productionPlan = { orderId: "missing", phase: "tracking", process: {}, synthesis: {}, pausedPlotIds: [] }; },
+    game => { game.productionPlan = { orderId: "order-1", phase: "tracking", process: { process: "rebar" }, synthesis: {}, pausedPlotIds: [] }; },
+    game => { game.productionPlan = { orderId: "order-1", phase: "tracking", process: { process: "rough" }, synthesis: {}, pausedPlotIds: ["missing"] }; },
+  ]) {
+    const game = advancedSave();
+    game.research.planning = 1;
+    corrupt(game);
+    assert.throws(() => parse(game), /无效|不完整/);
+  }
 });

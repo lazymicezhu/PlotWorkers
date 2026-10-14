@@ -1,4 +1,7 @@
 import type { ResourceKind } from "./resource-activity.ts";
+import { cancelProductionPlan, refreshProductionPlan, releasePlannedPlot, isPlannedPlotPaused, startOrderTracking as startOrderTrackingWithRecipes } from "./order-production-plan.ts";
+import type { ProductionPlan } from "./order-production-plan.ts";
+export { cancelProductionPlan as cancelOrderTracking, getOrderProductionStatus } from "./order-production-plan.ts";
 
 export type ZoneType = "gather" | "process" | "synthesis" | "living";
 export type ZoneId = string;
@@ -6,7 +9,7 @@ export type Personality = "leader" | "slowBurn" | "lazy";
 export type RecipeId = "rough" | "refined";
 export type SynthesisRecipeId = "cans" | "screws" | "rebar";
 export type SpecialItemId = "canOpener" | "smartLeader" | "holyLight";
-export type ResearchId = "synthesis" | "orders";
+export type ResearchId = "gather" | "process" | "synthesis" | "management" | "planning" | "orders" | "negotiation" | "delivery";
 export type WorkerStatus =
   | "idle"
   | "gathering"
@@ -84,6 +87,7 @@ export type OrderState = {
   processed: { kind: RecipeId; amount: number };
   synthesized: { kind: "screws" | "rebar"; amount: number };
   reward: "coins" | "special";
+  rerolled?: boolean;
 };
 export type HolyLightEffect = {
   id: string;
@@ -99,7 +103,7 @@ export type TimedEffectsState = {
 };
 
 export type GameState = {
-  version: 9;
+  version: 10;
   rebirthCount: 0 | 1;
   coins: number;
   inventory: {
@@ -127,7 +131,10 @@ export type GameState = {
   orders: OrderState[];
   orderElapsed: number;
   orderSerial: number;
+  orderRefreshCooldown: number;
   research: Record<ResearchId, number>;
+  researchInvestment: number;
+  productionPlan: ProductionPlan | null;
   effects: TimedEffectsState;
   plotPurchases: Record<ZoneType, number>;
 };
@@ -151,6 +158,10 @@ export const SYNTHESIS_RECIPES = {
 
 export const SYNTHESIS_SELL_PRICES = { screws: 30, rebar: 50 } as const;
 
+export function startOrderTracking(state: GameState, orderId: string): GameState {
+  return startOrderTrackingWithRecipes(state, orderId, SYNTHESIS_RECIPES);
+}
+
 export const SPECIAL_ITEM_NAMES: Record<SpecialItemId, string> = {
   canOpener: "罐头起子",
   smartLeader: "智械领袖",
@@ -158,8 +169,14 @@ export const SPECIAL_ITEM_NAMES: Record<SpecialItemId, string> = {
 };
 
 export const RESEARCH = {
-  synthesis: { name: "合成工程", costs: [50_000, 200_000, 800_000, 3_200_000, 12_800_000] },
-  orders: { name: "订单网络", costs: [50_000, 200_000, 800_000, 3_200_000, 12_800_000] },
+  gather: { name: "采集工具", group: "production", description: "每级采集速度 +10%", costs: [1_000, 3_000, 10_000, 30_000, 80_000] },
+  process: { name: "加工改良", group: "production", description: "每级加工速度 +10%", costs: [2_000, 6_000, 20_000, 60_000, 150_000] },
+  synthesis: { name: "合成工程", group: "production", description: "每级合成速度 +15%", costs: [3_000, 10_000, 30_000, 90_000, 250_000] },
+  management: { name: "班组管理", group: "automation", description: "解锁每台机器人的效率和接单间隔升级", costs: [3_000] },
+  planning: { name: "生产计划", group: "automation", description: "追踪订单并临时排产，交付后恢复原配方", costs: [5_000] },
+  orders: { name: "订单网络", group: "commerce", description: "每级订单基础金币奖励 +10%", costs: [5_000, 15_000, 45_000, 120_000, 300_000] },
+  negotiation: { name: "客户协商", group: "commerce", description: "解锁换单，冷却依次为 300 / 240 / 180 秒", costs: [3_000, 10_000, 30_000] },
+  delivery: { name: "交付保障", group: "commerce", description: "新订单期限依次为 330 / 360 / 390 秒", costs: [5_000, 15_000, 45_000] },
 } as const;
 
 export const PERSONALITY_NAMES: Record<Personality, string> = {
@@ -248,7 +265,7 @@ export function createInitialWorker(x: number, y: number): WorkerState {
 
 export function createInitialState(x: number, y: number): GameState {
   return {
-    version: 9,
+    version: 10,
     rebirthCount: 0,
     coins: 100,
     inventory: { raw: 0, cans: 20, rough: 0, refined: 0, screws: 0, rebar: 0, specials: { canOpener: 0, smartLeader: 0, holyLight: 0 } },
@@ -270,7 +287,10 @@ export function createInitialState(x: number, y: number): GameState {
     orders: [],
     orderElapsed: 0,
     orderSerial: 0,
-    research: { synthesis: 0, orders: 0 },
+    orderRefreshCooldown: 0,
+    research: { gather: 0, process: 0, synthesis: 0, management: 0, planning: 0, orders: 0, negotiation: 0, delivery: 0 },
+    researchInvestment: 0,
+    productionPlan: null,
     effects: { canOpener: 0, smartLeader: 0, holyLight: [] },
     plotPurchases: { gather: 0, process: 0, synthesis: 0, living: 0 },
   };
@@ -296,7 +316,9 @@ export function createRandomWorker(
 
 export function changeRecipe(state: GameState, plotId: ZoneId, recipe: RecipeId): GameState {
   const current = state.processPlots[plotId];
-  if (!current || current.recipe === recipe) return state;
+  if (!current) return state;
+  state = releasePlannedPlot(state, plotId);
+  if (current.recipe === recipe) return state;
   return {
     ...state,
     inventory: {
@@ -324,7 +346,9 @@ function refundSynthesisBatch(inventory: GameState["inventory"], batch: Synthesi
 
 export function changeSynthesisRecipe(state: GameState, plotId: ZoneId, recipe: SynthesisRecipeId): GameState {
   const current = state.synthesisPlots[plotId];
-  if (!current || current.recipe === recipe) return state;
+  if (!current) return state;
+  state = releasePlannedPlot(state, plotId);
+  if (current.recipe === recipe) return state;
   return {
     ...state,
     inventory: refundSynthesisBatch(state.inventory, current.batch),
@@ -437,6 +461,10 @@ export function recyclePlot(state: GameState, plotId: string): GameState {
     state.plots.filter((item) => item.type === plot.type).length <= 1 ||
     state.workers.some((worker) => worker.zoneId === plotId)
   ) return state;
+  // Drop the planner's snapshot immediately so an autosave in the same event
+  // cannot retain a reference to the recycled plot. The refund below owns all
+  // reserved ingredients; releasing the snapshot does not restore or refund.
+  state = releasePlannedPlot(state, plotId);
   return {
     ...state,
     coins: state.coins + Math.floor(plot.purchasePrice * .7),
@@ -478,7 +506,7 @@ export function buyResearch(state: GameState, id: ResearchId): GameState {
   const level = state.research[id];
   const cost = RESEARCH[id].costs[level];
   if (cost === undefined || state.coins < cost) return state;
-  return { ...state, coins: state.coins - cost, research: { ...state.research, [id]: level + 1 } };
+  return { ...state, coins: state.coins - cost, researchInvestment: state.researchInvestment + cost, research: { ...state.research, [id]: level + 1 } };
 }
 
 export function useSpecialItem(state: GameState, id: Exclude<SpecialItemId, "holyLight">): GameState {
@@ -504,7 +532,7 @@ export function placeHolyLight(state: GameState, x: number, y: number): GameStat
 
 export function upgradeSchedulerEfficiency(state: GameState, robotIndex: number): GameState {
   const robot = state.schedulerRobots[robotIndex];
-  if (state.coins < 100 || !robot || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX) return state;
+  if (!state.research.management || state.coins < 100 || !robot || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX) return state;
   return {
     ...state,
     coins: state.coins - 100,
@@ -516,7 +544,7 @@ export function upgradeSchedulerEfficiency(state: GameState, robotIndex: number)
 
 export function upgradeSchedulerInterval(state: GameState, robotIndex: number): GameState {
   const robot = state.schedulerRobots[robotIndex];
-  if (state.coins < 100 || !robot || robot.intervalSeconds <= .1) return state;
+  if (!state.research.management || state.coins < 100 || !robot || robot.intervalSeconds <= .1) return state;
   return {
     ...state,
     coins: state.coins - 100,
@@ -696,7 +724,7 @@ function createOrder(state: GameState, random: () => number): OrderState {
   const batches = Math.max(1, Math.floor(synthesisCapacity * (.3 + random() * .3) / synthesisRecipe.output));
   return {
     id: `order-${state.orderSerial + 1}`,
-    remaining: 300,
+    remaining: 300 + state.research.delivery * 30,
     processed: { kind: processed, amount: processedAmount },
     synthesized: { kind: synthesized, amount: batches * synthesisRecipe.output },
     reward: random() < .75 ? "coins" : "special",
@@ -717,7 +745,22 @@ export function submitOrder(state: GameState, orderId: string, random = Math.ran
     const item = randomSpecial(random);
     inventory.specials[item] += 1;
   }
-  return { ...state, coins, inventory, orders: state.orders.filter((item) => item.id !== orderId) };
+  const next = { ...state, coins, inventory, orders: state.orders.filter((item) => item.id !== orderId) };
+  return state.productionPlan?.orderId === orderId ? cancelProductionPlan(next) : next;
+}
+
+export function refreshOrder(state: GameState, orderId: string, random = Math.random): GameState {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order || order.remaining <= 0 || order.rerolled || state.research.negotiation <= 0 || state.orderRefreshCooldown > 0) return state;
+  const replacement = createOrder(state, random);
+  const next = {
+    ...state,
+    orderRefreshCooldown: [300, 240, 180][state.research.negotiation - 1],
+    orders: state.orders.map((item) => item.id === orderId ? {
+      ...replacement, id: order.id, reward: order.reward, remaining: order.remaining, rerolled: true,
+    } : item),
+  };
+  return state.productionPlan?.orderId === orderId ? cancelProductionPlan(next) : next;
 }
 
 export function orderCoinReward(state: GameState, order: OrderState) {
@@ -755,6 +798,8 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const synthesisPlots = Object.fromEntries(Object.entries(state.synthesisPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch, reserved: { ...value.batch.reserved } } }]));
   const plots = state.plots;
   const workers = state.workers.map((worker) => ({ ...worker }));
+  // The planner only mutates the working copy, including its saved recovery data.
+  state = { ...state, inventory, processPlots, synthesisPlots, workers, productionPlan: state.productionPlan ? structuredClone(state.productionPlan) : null };
 
   const plotById = new Map(plots.map((plot) => [plot.id, plot]));
   const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
@@ -830,7 +875,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     const holy = holyPlot(plot);
     if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100);
     if (worker.status !== "slacking") {
-      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * productionMultiplier(plot, holy);
+      const rate = gatherAttributeRate(worker.efficiency) * personalityRate(worker, gatherLeaders.get(worker.zoneId!) ?? 0) * (1 + state.research.gather * .1) * productionMultiplier(plot, holy);
       inventory.raw += 10 * rate * dt;
       onResourceChange?.("raw", 10 * rate * dt);
       worker.status = worker.mood <= 0 ? "exhausted" : "gathering";
@@ -850,28 +895,31 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     processPlots[plot.id] = plotState;
     const group = processWorkersByPlot.get(plot.id) ?? [];
     const active = group.filter((worker) => worker.status !== "slacking");
-    const recipe = RECIPES[plotState.recipe];
-    if (!plotState.batch.active && active.length && inventory.raw >= recipe.raw) {
+    const startBatch = (work = 0) => {
+      refreshProductionPlan(state, SYNTHESIS_RECIPES);
+      const recipe = RECIPES[plotState.recipe];
+      if (!active.length || isPlannedPlotPaused(state, plot.id) || inventory.raw < recipe.raw) return;
       inventory.raw -= recipe.raw;
       onResourceChange?.("raw", -recipe.raw);
-      plotState.batch = { active: true, progress: 0, reservedRaw: recipe.raw };
-    }
+      plotState.batch = { active: true, progress: work / recipe.seconds, reservedRaw: recipe.raw };
+    };
+    if (!plotState.batch.active) startBatch();
     if (plotState.batch.active && active.length) {
       const leaders = group.filter((worker) => !isForeman(worker) && worker.personality === "leader").length;
       const holy = holyPlot(plot);
       let contribution = 0;
-      for (const worker of active) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * productionMultiplier(plot, holy); worker.status = worker.mood <= 0 ? "exhausted" : "processing"; }
+      for (const worker of active) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * (1 + state.research.process * .1) * productionMultiplier(plot, holy); worker.status = worker.mood <= 0 ? "exhausted" : "processing"; }
       for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
-      plotState.batch.progress += contribution * dt / recipe.seconds;
-      while (plotState.batch.progress >= 1) {
-        const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += 1; plotState.produced += 1;
+      plotState.batch.progress += contribution * dt / RECIPES[plotState.recipe].seconds;
+      while (plotState.batch.active && plotState.batch.progress >= 1) {
+        // Preserve remaining work, rather than the old recipe's percentage,
+        // when the planner switches recipes at a completed batch boundary.
+        const work = (plotState.batch.progress - 1) * RECIPES[plotState.recipe].seconds;
+        inventory[plotState.recipe] += 1;
+        plotState.produced += 1;
         onResourceChange?.(plotState.recipe, 1);
-        if (inventory.raw >= recipe.raw) {
-          inventory.raw -= recipe.raw;
-          onResourceChange?.("raw", -recipe.raw);
-          plotState.batch = { active: true, progress: overflow, reservedRaw: recipe.raw };
-        }
-        else plotState.batch = { active: false, progress: 0, reservedRaw: 0 };
+        plotState.batch = { active: false, progress: 0, reservedRaw: 0 };
+        startBatch(work);
       }
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
   }
@@ -882,38 +930,35 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     synthesisPlots[plot.id] = plotState;
     const group = synthesisWorkersByPlot.get(plot.id) ?? [];
     const active = group.filter((worker) => worker.status !== "slacking");
-    const recipe = SYNTHESIS_RECIPES[plotState.recipe];
-    const canReserve = Object.entries(recipe.inputs).every(([kind, amount]) => inventory[kind as "rough" | "refined" | "screws"] >= amount);
-    if (!plotState.batch.active && active.length && canReserve) {
+    const startBatch = (work = 0) => {
+      refreshProductionPlan(state, SYNTHESIS_RECIPES);
+      const recipe = SYNTHESIS_RECIPES[plotState.recipe];
+      if (!active.length || isPlannedPlotPaused(state, plot.id)
+        || !Object.entries(recipe.inputs).every(([kind, amount]) => inventory[kind as "rough" | "refined" | "screws"] >= amount)) return;
       const reserved: SynthesisPlotState["batch"]["reserved"] = {};
       for (const [kind, amount] of Object.entries(recipe.inputs)) {
         inventory[kind as "rough" | "refined" | "screws"] -= amount;
         onResourceChange?.(kind as ResourceKind, -amount);
         reserved[kind as "rough" | "refined" | "screws"] = amount;
       }
-      plotState.batch = { active: true, progress: 0, reserved };
-    }
+      plotState.batch = { active: true, progress: work / recipe.seconds, reserved };
+    };
+    if (!plotState.batch.active) startBatch();
     if (plotState.batch.active && active.length) {
       const leaders = group.filter((worker) => !isForeman(worker) && worker.personality === "leader").length;
       const holy = holyPlot(plot);
       let contribution = 0;
       for (const worker of active) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); contribution += processAttributeRate(worker.efficiency) * personalityRate(worker, leaders) * (1 + state.research.synthesis * .15) * productionMultiplier(plot, holy); worker.status = worker.mood <= 0 ? "exhausted" : "synthesizing"; }
       for (const worker of group.filter((item) => item.status === "slacking")) { if (!holy && !isForeman(worker)) worker.mood = clamp(worker.mood - staminaDrainRate(worker.stamina) * dt, 0, 100); if (worker.mood <= 0) worker.status = "exhausted"; }
-      plotState.batch.progress += contribution * dt / recipe.seconds;
-      while (plotState.batch.progress >= 1) {
-        const overflow = plotState.batch.progress - 1; inventory[plotState.recipe] += recipe.output; plotState.produced += recipe.output;
+      plotState.batch.progress += contribution * dt / SYNTHESIS_RECIPES[plotState.recipe].seconds;
+      while (plotState.batch.active && plotState.batch.progress >= 1) {
+        const recipe = SYNTHESIS_RECIPES[plotState.recipe];
+        const work = (plotState.batch.progress - 1) * recipe.seconds;
+        inventory[plotState.recipe] += recipe.output;
+        plotState.produced += recipe.output;
         onResourceChange?.(plotState.recipe, recipe.output);
-        const reserveAgain = Object.entries(recipe.inputs).every(([kind, amount]) => inventory[kind as "rough" | "refined" | "screws"] >= amount);
-        if (reserveAgain) {
-          const reserved: SynthesisPlotState["batch"]["reserved"] = {};
-          for (const [kind, amount] of Object.entries(recipe.inputs)) {
-            inventory[kind as "rough" | "refined" | "screws"] -= amount;
-            onResourceChange?.(kind as ResourceKind, -amount);
-            reserved[kind as "rough" | "refined" | "screws"] = amount;
-          }
-          plotState.batch = { active: true, progress: overflow, reserved };
-        }
-        else plotState.batch = { active: false, progress: 0, reserved: {} };
+        plotState.batch = { active: false, progress: 0, reserved: {} };
+        startBatch(work);
       }
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
   }
@@ -928,7 +973,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     orderElapsed = 0;
   }
   const canOpenerSeconds = Math.max(0, state.canOpenerSeconds - dt);
-  return { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, orders, orderElapsed, orderSerial, effects };
+  const next = { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, orders, orderElapsed, orderSerial, effects, orderRefreshCooldown: Math.max(0, state.orderRefreshCooldown - dt) };
+  // Expiry uses the same safe batch-boundary recovery as manual cancellation.
+  if (next.productionPlan?.phase === "tracking" && !orders.some((order) => order.id === next.productionPlan?.orderId)) return cancelProductionPlan(next);
+  refreshProductionPlan(next, SYNTHESIS_RECIPES);
+  return next;
 }
 
 export function parseSavedState(value: string | null): GameState | null {
@@ -950,7 +999,7 @@ export function parseSavedState(value: string | null): GameState | null {
       batch?: ProcessPlotState["batch"];
     };
     if (
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(parsed.version ?? 0) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(parsed.version ?? 0) ||
       !Number.isFinite(parsed.coins) ||
       !Array.isArray(parsed.workers) ||
       !parsed.inventory ||
@@ -963,7 +1012,7 @@ export function parseSavedState(value: string | null): GameState | null {
     if (foremanCount > 1) return null;
     // Older previews already carried this reward. Preserve it while preventing
     // another first-rebirth grant; current saves must carry a consistent record.
-    if (parsed.version === 9 && (
+    if ((parsed.version ?? 0) >= 9 && (
       (parsed.rebirthCount !== 0 && parsed.rebirthCount !== 1)
       || parsed.rebirthCount !== foremanCount
     )) return null;
@@ -1055,8 +1104,36 @@ export function parseSavedState(value: string | null): GameState | null {
         },
       };
     });
+    const legacyResearch = (parsed.version ?? 0) < 10;
+    const research = Object.fromEntries((Object.keys(RESEARCH) as ResearchId[]).map((id) => {
+      const saved = legacyResearch && id !== "synthesis" && id !== "orders" ? 0 : parsed.research?.[id];
+      const level = typeof saved === "number" && Number.isFinite(saved) ? clamp(Math.floor(saved), 0, RESEARCH[id].costs.length) : 0;
+      return [id, level];
+    })) as Record<ResearchId, number>;
+    // Prior versions allowed robot upgrades without this research. Keep those
+    // upgrades available, while excluding the free unlock from asset value.
+    if (legacyResearch && schedulerRobots.some((robot) => robot.efficiency > 1 || robot.intervalSeconds < 3)) research.management = 1;
+    const oldResearchCosts = [50_000, 200_000, 800_000, 3_200_000, 12_800_000];
+    const researchInvestment = legacyResearch
+      ? [research.synthesis, research.orders].reduce((total, level) => total + oldResearchCosts.slice(0, level).reduce((sum, cost) => sum + cost, 0), 0)
+      : parsed.researchInvestment;
+    if (!Number.isFinite(researchInvestment) || researchInvestment! < 0) return null;
+    const orderRefreshCooldown = legacyResearch ? 0 : parsed.orderRefreshCooldown;
+    if (!Number.isFinite(orderRefreshCooldown) || orderRefreshCooldown! < 0) return null;
+    const productionPlan = legacyResearch ? null : parsed.productionPlan;
+    if (productionPlan === undefined) return null;
+    if (productionPlan !== null && (
+      !productionPlan || typeof productionPlan !== "object"
+      || typeof productionPlan.orderId !== "string" || !productionPlan.orderId.trim()
+      || !["tracking", "restoring"].includes(productionPlan.phase)
+      || !productionPlan.process || typeof productionPlan.process !== "object" || Array.isArray(productionPlan.process)
+      || !Object.values(productionPlan.process).every((recipe) => recipe === "rough" || recipe === "refined")
+      || !productionPlan.synthesis || typeof productionPlan.synthesis !== "object" || Array.isArray(productionPlan.synthesis)
+      || !Object.values(productionPlan.synthesis).every((recipe) => recipe === "cans" || recipe === "screws" || recipe === "rebar")
+      || !Array.isArray(productionPlan.pausedPlotIds) || !productionPlan.pausedPlotIds.every((id) => typeof id === "string")
+    )) return null;
     return {
-      version: 9,
+      version: 10,
       rebirthCount,
       coins: parsed.coins!,
       plots,
@@ -1116,10 +1193,10 @@ export function parseSavedState(value: string | null): GameState | null {
       orders: Array.isArray(parsed.orders) ? parsed.orders.filter((order) => order && order.remaining > 0).slice(0, 2) : [],
       orderElapsed: Number.isFinite(parsed.orderElapsed) ? clamp(parsed.orderElapsed!, 0, 180) : 0,
       orderSerial: Number.isFinite(parsed.orderSerial) ? Math.max(0, Math.floor(parsed.orderSerial!)) : 0,
-      research: {
-        synthesis: clamp(Math.floor(parsed.research?.synthesis ?? 0), 0, 5),
-        orders: clamp(Math.floor(parsed.research?.orders ?? 0), 0, 5),
-      },
+      orderRefreshCooldown: orderRefreshCooldown!,
+      research,
+      researchInvestment: researchInvestment!,
+      productionPlan: productionPlan ? structuredClone(productionPlan) : null,
       effects: {
         canOpener: Math.max(0, parsed.effects?.canOpener ?? parsed.canOpenerSeconds ?? 0),
         smartLeader: Math.max(0, parsed.effects?.smartLeader ?? 0),

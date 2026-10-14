@@ -14,7 +14,7 @@ const synthesisPlot = () => ({ id: "synthesis", type: "synthesis", name: "合成
 
 test("initial assets include free workers, plots and the initial robot", () => {
   const result = saveValuation(fresh());
-  assert.equal(result.version, 2);
+  assert.equal(result.version, 3);
   assert.equal(result.total, 3940);
   assert.deepEqual(result.items.map(({ id, value }) => [id, value]), [
     ["coins", 100], ["inventory", 40], ["workers", 100], ["plots", 2700],
@@ -67,6 +67,7 @@ test("purchases convert coins to current assets without creating valuation gains
     (state) => buyPlot(state, synthesisPlot()),
     buySchedulerBot,
     buySchedulerBot,
+    (state) => buyResearch(state, "management"),
     (state) => upgradeSchedulerEfficiency(state, 0),
     (state) => upgradeSchedulerInterval(state, 0),
     (state) => upgradeSchedulerEfficiency(state, 1),
@@ -90,6 +91,7 @@ test("purchases convert coins to current assets without creating valuation gains
 test("robot upgrade levels are counted exactly despite decimal representation", () => {
   let game = fresh();
   game.coins = 10_000;
+  game = buyResearch(game, "management");
   const total = saveValuation(game).total;
   for (let index = 0; index < 29; index += 1) {
     game = upgradeSchedulerInterval(game, 0);
@@ -175,4 +177,20 @@ test("extreme external numbers cannot produce unsafe or nonfinite valuations", (
   assert.equal(result.total, Number.MAX_SAFE_INTEGER);
   assert.equal(result.items.reduce((sum, item) => sum + item.value, 0), result.total);
   assert.ok(result.items.every((item) => Number.isSafeInteger(item.value) && item.value >= 0));
+});
+
+test("legacy research keeps historical investment after repricing and subsequent purchases", () => {
+  const old = fresh();
+  old.version = 9;
+  old.research = { synthesis: 4, orders: 3 };
+  old.coins = 500_000;
+  delete old.researchInvestment;
+  const migrated = parseSavedState(JSON.stringify(old));
+  assert.equal(migrated.researchInvestment, 5_300_000);
+  assert.equal(itemValue(migrated, "upgrades"), 5_300_000);
+  const bought = buyResearch(migrated, "synthesis");
+  assert.equal(bought.researchInvestment, 5_550_000);
+  assert.equal(bought.coins, 250_000);
+  assert.equal(saveValuation(bought).total, saveValuation(migrated).total);
+  assert.deepEqual(saveValuation(parseSavedState(JSON.stringify(bought))), saveValuation(bought));
 });
