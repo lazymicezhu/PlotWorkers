@@ -73,13 +73,13 @@ function restorePlot(state: GameState, id: string, force: boolean): boolean {
   return true;
 }
 
-function finishRestoring(state: GameState) {
+function finishRestoring(state: GameState, force = false) {
   const plan = state.productionPlan;
   if (!plan) return;
   for (const id of [...Object.keys(plan.process), ...Object.keys(plan.synthesis)]) {
     const plot = state.plots.find((item) => item.id === id);
     // A stopped or unattended batch cannot finish: return its inputs instead.
-    restorePlot(state, id, !plot || plot.enabled === false || !hasStaff(state, id));
+    restorePlot(state, id, force || !plot || plot.enabled === false || !hasStaff(state, id));
   }
   if (!Object.keys(plan.process).length && !Object.keys(plan.synthesis).length) state.productionPlan = null;
 }
@@ -100,11 +100,11 @@ export function startOrderTracking(state: GameState, orderId: string, recipes: S
   return next;
 }
 
-export function cancelProductionPlan(state: GameState): GameState {
+export function cancelProductionPlan(state: GameState, forceRestore = false): GameState {
   if (!state.productionPlan) return state;
   const next = cloneProductionState(state);
   next.productionPlan!.phase = "restoring";
-  finishRestoring(next);
+  finishRestoring(next, forceRestore);
   return next;
 }
 
@@ -238,5 +238,5 @@ export function getOrderProductionStatus(state: GameState): OrderProductionStatu
   if (!active && ids.length && ids.every((id) => plan.pausedPlotIds.includes(id) || !hasStaff(state, id) || state.workers.some((worker) => worker.zoneId === id && worker.status === "waiting"))) {
     return { phase: "blocked", label: "等待材料", detail: "产线正在等待原料或上游材料，请检查采集、库存和手动退出托管的地块。" };
   }
-  return { phase: "tracking", label: "正在生产", detail: `托管 ${processIds.length} 个加工区、${synthesisIds.length} 个合成区；先补齐上游材料，并保留罐头补给。` };
+  return { phase: "tracking", label: "正在生产", detail: `托管 ${processIds.length} 个加工区、${synthesisIds.length} 个合成区` };
 }

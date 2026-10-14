@@ -1,0 +1,87 @@
+.pond,
+.animation {
+  position: absolute;
+  max-width: none;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pond {
+  z-index: 3;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+
+.animation {
+  z-index: 101;
+}
+
+.workerHit {
+  position: absolute;
+  z-index: 110;
+  width: 44px;
+  height: 65px;
+  transform: translate(-50%, -85%);
+  cursor: grab;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.workerHit:active {
+  cursor: grabbing;
+}
+
+.harvestScroll {
+  margin-top: 12px;
+  max-height: min(560px, calc(100dvh - 200px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #d2dbcf transparent;
+}
+
+.history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.historyRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 34px;
+  padding: 7px 1px;
+  border-bottom: 1px solid #edf0eb;
+  color: #3d4b40;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.historyRow:last-child {
+  border-bottom: 0;
+}
+
+.age {
+  color: #869187;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.empty > span {
+  color: #788679;
+}
+
+.gold > span {
+  color: #bd8a24;
+}
+
+.noHistory {
+  padding: 18px 0;
+  text-align: center;
+  color: #869187;
+  font-size: 13px;
+}

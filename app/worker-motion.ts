@@ -9,6 +9,11 @@ export function parseWorkerTranslation(value: string): Point | null {
 }
 
 export function readRenderedWorkerPosition(element: Element | null): Point | null {
+  if (element?.hasAttribute("data-fishing-worker")) {
+    const x = Number(element.getAttribute("data-world-x"));
+    const y = Number(element.getAttribute("data-world-y"));
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
   return element ? parseWorkerTranslation(getComputedStyle(element).translate) : null;
 }
 

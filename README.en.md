@@ -10,8 +10,9 @@ Plot Workers is an incremental management game about building production chains 
 - Drag-and-drop worker assignment and movable isometric plots
 - Worker mood, attributes, personalities, and rest
 - Per-plot recipes, batch production, market prices, and timed orders
-- Robot dispatch automation and permanent upgrades for synthesis speed and order coin rewards
+- Robot dispatch automation, three standard research groups, and special plot unlocks
 - Special orders that award extra coins plus items to boost production, robot transport, and mood recovery
+- Order Refresh Tickets to fill an empty order slot and rare Golden Order Tickets to complete an order without materials
 - Versioned local saves with no account required
 
 ## How to play
@@ -26,7 +27,11 @@ Drag an empty part of the scene to move the camera. Use the mouse wheel or the `
 
 Building a synthesis plot unlocks orders. A new order arrives every 180 seconds, with up to two active at once; deliver the required products manually to receive its displayed rewards. Regular coin orders make up 75% of orders. The other 25% are special orders, which award 1.5 times the regular coin reward for the same products (rounded up), plus one random special item. Both order types calculate coins using market prices and research levels at delivery. Use special items from the backpack when needed.
 
-Research has three groups: Production, Automation, and Commerce. Gathering Tools and Processing Improvements add 10% speed per level, Synthesis Engineering adds 15%, and Order Network adds 10% of the base coin reward; each has five levels. Team Management (3,000 coins) unlocks per-robot upgrades. Production Planning (5,000 coins) tracks one order, temporarily schedules recipes and upstream ingredients, then restores prior recipes after delivery or cancellation. Customer Negotiation unlocks order replacement; Delivery Assurance extends new deadlines. All research resets on rebirth.
+An Order Refresh Ticket immediately adds one order when you own a synthesis plot and have an empty order slot. It leaves the natural arrival timer and research replacement cooldown unchanged. A Golden Order Ticket, displayed with a gold name, completes a selected unexpired order without using materials and grants its full coin and special-item rewards. Within special-order item rewards, Can Opener, Smart Leader, and Holy Light each have a 25% chance, Order Refresh Ticket has 23%, and Golden Order Ticket has 2%. Older saves start with zero of each new ticket.
+
+Research includes three standard groups—Production, Automation, and Commerce—plus Special Plots. Gathering Tools and Processing Improvements add 10% speed per level, Synthesis Engineering adds 15%, and Order Network adds 10% of the base coin reward; each has five levels. Team Management (3,000 coins) unlocks per-robot upgrades. Production Planning (5,000 coins) tracks one order, temporarily schedules recipes and upstream ingredients, then restores prior recipes after delivery or cancellation. Customer Negotiation unlocks order replacement; Delivery Assurance extends new deadlines. All research resets on rebirth.
+
+Research → Special Plots offers one free 4×4 Fishing Pond, placed through the usual plot placement flow. Manually drag up to three workers onto the pond; they snap to available seats. Each round takes 60 seconds, or 30 seconds for Lazy workers, without consuming or restoring mood; workers can keep fishing at zero mood. Catches go directly into the game inventory, and the pond’s Harvest button shows the latest 20 outcomes with their ages.
 
 ## Local development
 
@@ -43,10 +48,13 @@ Useful commands:
 | --- | --- |
 | `npm run dev` | Start the local development server |
 | `npm run build` | Create a production build |
+| `npm run preview` | Preview the build at http://127.0.0.1:49224/ |
 | `npm test` | Build and run the automated tests |
 | `npm run lint` | Run the code quality checks |
 | `npm run deploy` | Build and deploy to Cloudflare Workers |
 | `npm run deploy:preview` | Build and upload a preview Worker version |
+
+The preview uses finite resources by default; `?resources=infinite` opens the original unlimited mode. Saves and backups are separate. On the first finite-mode visit, the unlimited workshop is copied with processed goods, screws, and rebar cleared; coins, raw material, cans, and scheduler time are capped at 100,000, 10,000, 1,000, and 30 minutes. Production and consumption then follow normal rules, without resetting on reload.
 
 ## Deploy to Cloudflare Workers
 
@@ -95,6 +103,8 @@ If a fully static edition is needed, follow Cloudflare's [Next.js static export 
 - Local environment files, deployment state, logs, and credentials are excluded from Git.
 
 ### Save compatibility
+
+Save version 11 adds the Fishing Pond unlock, seats, independent progress, and recent harvest history. Versions 1–10 migrate automatically and can unlock the free pond.
 
 Save version 10 adds research investment history, replacement cooldowns, and persistent order production plans. Versions 1–9 migrate automatically, retaining old research levels and historical purchase value. Saves with existing robot parameter upgrades receive Team Management at no extra cost.
 

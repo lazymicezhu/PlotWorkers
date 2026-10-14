@@ -1,12 +1,19 @@
 .page { color:#2d3631; font:inherit; font-size:12px; line-height:1.5; }
 .page * { box-sizing:border-box; }
-.page .heading { margin:0 0 8px; font-size:21px; font-weight:650; letter-spacing:-.7px; line-height:1.4; }
-.page .note { margin:0 0 25px; color:#8a938c; font-size:10px; line-height:1.7; }
+.page .heading { margin:0 0 18px; font-size:21px; font-weight:650; letter-spacing:-.7px; line-height:1.4; }
 .group + .group { margin-top:27px; }
-.page .group h3 { margin:0 0 4px; color:#53684d; font-size:13px; font-weight:650; }
-.page .description { margin:0 0 12px; color:#8a938c; font-size:10px; line-height:1.6; }
+.page .group h3 { margin:0 0 12px; color:#53684d; font-size:13px; font-weight:650; }
 .cards { display:grid; gap:12px; }
 .card { min-width:0; padding:16px 17px; border:1px solid #e5e9df; border-radius:12px; background:#fff; }
+.card:focus-visible { outline:2px solid #7d946f; outline-offset:3px; }
+.targeted { animation:researchTarget 2s ease-out; }
+@keyframes researchTarget {
+  0%,40% { border-color:#93ab80; background:#f0f5e9; box-shadow:0 0 0 3px #93ab8026; }
+  100% { border-color:#e5e9df; background:#fff; box-shadow:0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .targeted { animation:none; border-color:#93ab80; background:#f0f5e9; }
+}
 .cardTop { display:flex; align-items:center; gap:9px; }
 .icon { display:flex; color:#849477; }
 .page .card h4 { margin:0; color:#475941; font-size:12px; font-weight:600; }

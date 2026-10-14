@@ -41,9 +41,10 @@ export function simulateElapsed(
 ) {
   let next = state;
   let remaining = Math.max(0, Math.min(5, seconds));
+  const endedAt = Date.now();
   while (remaining > 0) {
     const dt = Math.min(1, remaining);
-    next = stepGame(next, dt, random, onResourceChange);
+    next = stepGame(next, dt, random, onResourceChange, endedAt - (remaining - dt) * 1000);
     remaining -= dt;
   }
   return next;

@@ -8,14 +8,17 @@ import { canFirstRebirth, FIRST_REBIRTH_ASSET_REQUIREMENT } from "./rebirth";
 import { ForemanDescription } from "./foreman-description";
 import { ForemanProfile } from "./foreman-profile";
 import { SettingsPanel } from "./settings-panel";
+import { SettingsDebug } from "./settings-debug";
+import type { DebugAction } from "./debug-actions";
 import panel from "./settings-panel.module.css";
 import styles from "./settings-dialog.module.css";
 
 export const SAVE_BACKUP_KEY = "green-realm-save-backup-v1";
+const DEBUG_ACCESS_PASSWORD = "lazymice";
 const number = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const decimal = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 type ImportPreview = { state: GameState; exportedAt: string | null; name: string; backup: boolean };
-type Page = "home" | "assets" | "rebirth" | "foreman" | "more" | "reset" | "import";
+type Page = "home" | "assets" | "rebirth" | "foreman" | "more" | "reset" | "import" | "debug-access" | "debug";
 
 function assetAmount(value: number) {
   if (value >= 100_000_000) return `${decimal.format(value / 100_000_000)} 亿`;
@@ -27,12 +30,13 @@ function saveDate(value: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "旧版存档";
 }
 
-export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onImport, onReset, performanceEnabled, onPerformanceChange, resourceChangesEnabled, onResourceChangesChange, rebirth }: {
+export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onImport, onReset, onDebug, performanceEnabled, onPerformanceChange, resourceChangesEnabled, onResourceChangesChange, rebirth }: {
   game: GameState;
   backupKey?: string;
   onClose: () => void;
   onImport: (state: GameState) => void;
   onReset: () => void;
+  onDebug: (action: DebugAction) => void;
   performanceEnabled: boolean;
   onPerformanceChange: (enabled: boolean) => void;
   resourceChangesEnabled: boolean;
@@ -40,6 +44,7 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
   rebirth?: { completed: boolean; onRebirth: () => void };
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
   const readId = useRef(0);
   const [page, setPage] = useState<Page>("home");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -47,6 +52,7 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
   const [reading, setReading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [debugPassword, setDebugPassword] = useState("");
   const valuation = useMemo(() => saveValuation(game), [game]);
   const importValue = useMemo(() => preview ? saveValuation(preview.state).total : 0, [preview]);
   const threshold = FIRST_REBIRTH_ASSET_REQUIREMENT;
@@ -63,12 +69,17 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
     return () => { readId.current += 1; };
   }, [backupKey]);
 
+  useEffect(() => {
+    if (page === "debug-access") passwordRef.current?.focus({ preventScroll: true });
+  }, [page]);
+
   function navigate(next: Page) {
     readId.current += 1;
     setReading(false);
     setPreview(null);
     setError("");
     setMessage("");
+    setDebugPassword("");
     setPage(next);
   }
 
@@ -150,7 +161,7 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
   }
 
   const titles: Record<Page, string> = {
-    home: "设置", assets: "总资产", rebirth: "转生", foreman: "包工头", more: "更多设置", reset: "重新开始",
+    home: "设置", assets: "总资产", rebirth: "转生", foreman: "包工头", more: "更多设置", reset: "重新开始", "debug-access": "调试", debug: "调试",
     import: preview?.backup ? "恢复备份" : "导入存档",
   };
   const back = page === "home" ? undefined : goBack;
@@ -166,7 +177,7 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
     : null;
 
   return <SettingsPanel title={titles[page]} page={page} onClose={onClose} onBack={back} actions={actions}
-    feedback={error ? <p className={panel.error} role="alert">{error}</p> : <p role="status">{message}</p>}
+    feedback={error ? <p id="settings-error" className={panel.error} role="alert">{error}</p> : <p role="status">{message}</p>}
   >
     {page === "home" && <>
       {row("总资产", "assets", assetAmount(valuation.total), true)}
@@ -176,6 +187,7 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
       <div className={styles.links}>
         {rebirth && row("转生", "rebirth", rebirth.completed ? "已完成" : eligible ? "已达成条件" : "500 万资产解锁")}
         {row("更多设置", "more")}
+        {row("调试", "debug-access")}
       </div>
     </>}
     {page === "assets" && <>
@@ -200,6 +212,38 @@ export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onI
       <p className={styles.note}>{rebirth.completed ? "首次转生仅可进行一次。" : "金币、库存、地块、普通工人、机器人及升级将重置。包工头会加入新工坊。首次转生仅可进行一次。"}</p>
     </>}
     {page === "foreman" && <ForemanProfile />}
+    {page === "debug-access" && <form className={styles.passwordForm} onSubmit={(event) => {
+      event.preventDefault();
+      if (debugPassword === DEBUG_ACCESS_PASSWORD) {
+        navigate("debug");
+      } else {
+        setError("密码不正确，请重试。");
+        setDebugPassword("");
+        passwordRef.current?.focus({ preventScroll: true });
+      }
+    }}>
+      <h3 className={styles.title}>请输入调试密码</h3>
+      <p id="debug-access-description" className={styles.intro}>验证后可调整资源与研究。</p>
+      <label className={styles.passwordField}>密码
+        <input ref={passwordRef} type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} required value={debugPassword}
+          aria-invalid={!!error} aria-describedby={error ? "debug-access-description settings-error" : "debug-access-description"}
+          onChange={(event) => { setDebugPassword(event.target.value); setError(""); }} />
+      </label>
+      <div className={styles.buttons}>
+        <button type="button" className={panel.button} onClick={goBack}>取消</button>
+        <button type="submit" className={`${panel.button} ${panel.solid}`} disabled={!debugPassword}>进入调试</button>
+      </div>
+    </form>}
+    {page === "debug" && <SettingsDebug game={game} onAction={(action, success) => {
+      setError("");
+      setMessage("");
+      try {
+        onDebug(action);
+        setMessage(success);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "调试修改失败，请重试。");
+      }
+    }} />}
     {page === "more" && <>
       <label className={styles.row}><span>显示资源增减提示</span><input className={styles.switch} type="checkbox" role="switch" checked={resourceChangesEnabled} onChange={(event) => onResourceChangesChange(event.target.checked)} /></label>
       <label className={styles.row}><span>显示性能数据</span><input className={styles.switch} type="checkbox" role="switch" checked={performanceEnabled} onChange={(event) => onPerformanceChange(event.target.checked)} /></label>

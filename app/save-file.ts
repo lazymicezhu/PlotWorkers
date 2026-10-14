@@ -1,12 +1,13 @@
-import { RESEARCH, SCHEDULER_EFFICIENCY_MAX, orderCoinReward, parseSavedState } from "./game-engine.ts";
+import { RESEARCH, SCHEDULER_EFFICIENCY_MAX, SPECIAL_ITEM_IDS, orderCoinReward, parseSavedState } from "./game-engine.ts";
 import type { GameState } from "./game-engine.ts";
+import { isValidFishingPlotState, isValidFishingProgress } from "./fishing.ts";
 
 export const MAX_SAVE_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_COLLECTION_SIZE = 10_000;
 const SAVE_FORMAT = "plot-workers-save";
 const INVALID_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-const ZONE_TYPES = ["gather", "process", "synthesis", "living"];
-const WORKER_STATUSES = ["idle", "gathering", "processing", "synthesizing", "waiting", "slacking", "exhausted", "resting", "ready"];
+const ZONE_TYPES = ["gather", "process", "synthesis", "living", "fishing"];
+const WORKER_STATUSES = ["idle", "gathering", "processing", "synthesizing", "waiting", "slacking", "exhausted", "resting", "ready", "fishing"];
 type ObjectValue = Record<string, unknown>;
 
 function invalid(field: string): never {
@@ -65,6 +66,33 @@ function checkHolyLights(value: unknown) {
   }
 }
 
+function checkFishing(state: GameState) {
+  const plots = state.plots.filter((plot) => plot.type === "fishing");
+  if (plots.length > 1) invalid("摸鱼池数量");
+  const fishingPlots = object(state.fishingPlots, "摸鱼池收获");
+  for (const [plotId, value] of Object.entries(fishingPlots)) {
+    id(plotId, "摸鱼池编号");
+    if (!plots.some((plot) => plot.id === plotId)) invalid("摸鱼池收获引用");
+    if (!isValidFishingPlotState(value)) invalid("摸鱼池收获记录");
+  }
+  for (const plot of plots) {
+    if (state.research.fishing !== 1) invalid("摸鱼池研究");
+    if (plot.cols !== 4 || plot.rows !== 4) invalid("摸鱼池大小");
+    if (!isValidFishingPlotState(fishingPlots[plot.id])) invalid("摸鱼池收获记录");
+    const occupied = new Set<string>();
+    for (const worker of state.workers.filter((worker) => worker.zoneId === plot.id)) {
+      if (!isValidFishingProgress(worker.fishing)) invalid("人物垂钓进度");
+      if (occupied.has(worker.fishing.seat)) invalid("重复垂钓位置");
+      occupied.add(worker.fishing.seat);
+    }
+    if (occupied.size > 3) invalid("垂钓人数");
+  }
+  for (const worker of state.workers) {
+    if (worker.fishing !== undefined && !isValidFishingProgress(worker.fishing)) invalid("人物垂钓进度");
+    if (worker.status === "fishing" && !plots.some((plot) => plot.id === worker.zoneId)) invalid("人物垂钓地块");
+  }
+}
+
 function checkProductionPlan(value: unknown, state?: GameState) {
   if (value === null) return;
   const plan = object(value, "生产计划");
@@ -114,7 +142,7 @@ function checkState(state: GameState) {
   const inventory = object(state.inventory, "库存");
   for (const key of ["raw", "cans", "rough", "refined", "screws", "rebar"]) number(inventory[key], `库存.${key}`);
   const specials = object(inventory.specials, "特殊物品");
-  for (const key of ["canOpener", "smartLeader", "holyLight"]) number(specials[key], `特殊物品.${key}`, 0, Number.MAX_SAFE_INTEGER, true);
+  for (const key of SPECIAL_ITEM_IDS) number(specials[key], `特殊物品.${key}`, 0, Number.MAX_SAFE_INTEGER, true);
 
   const plotIds = new Set<string>();
   for (const rawPlot of list(state.plots, "地块")) {
@@ -184,6 +212,7 @@ function checkState(state: GameState) {
   for (const key of ["autoCanSupply", "autoSchedulerSupply", "schedulerServiceUnlocked"] as const) boolean(state[key], key);
   const research = object(state.research, "研究");
   for (const [key, info] of Object.entries(RESEARCH)) number(research[key], `研究.${key}`, 0, info.costs.length, true);
+  checkFishing(state);
   number(state.researchInvestment, "研究投入");
   number(state.orderRefreshCooldown, "换单冷却", 0, 300);
   checkProductionPlan(state.productionPlan, state);
@@ -199,6 +228,7 @@ function checkState(state: GameState) {
     if (orderIds.has(orderId)) invalid("重复订单编号");
     orderIds.add(orderId);
     number(order.remaining, "订单时间");
+    number(order.duration, "订单总时长", Math.max(Number.MIN_VALUE, order.remaining));
     const processed = object(order.processed, "订单加工品");
     const synthesized = object(order.synthesized, "订单合成品");
     choice(processed.kind, ["rough", "refined"], "订单加工品类型");
@@ -216,7 +246,7 @@ function checkProvidedValues(raw: ObjectValue) {
   for (const key of ["screws", "rebar"]) if (inventory[key] !== undefined) number(inventory[key], `库存.${key}`);
   if (inventory.specials !== undefined) {
     const specials = object(inventory.specials, "特殊物品");
-    for (const key of ["canOpener", "smartLeader", "holyLight"]) if (specials[key] !== undefined) number(specials[key], `特殊物品.${key}`, 0, Number.MAX_SAFE_INTEGER, true);
+    for (const key of SPECIAL_ITEM_IDS) if (specials[key] !== undefined) number(specials[key], `特殊物品.${key}`, 0, Number.MAX_SAFE_INTEGER, true);
   }
   if (raw.effects !== undefined) {
     const effects = object(raw.effects, "道具效果");
@@ -229,12 +259,30 @@ function checkProvidedValues(raw: ObjectValue) {
   for (const key of ["autoCanSupply", "autoSchedulerSupply", "schedulerServiceUnlocked"]) if (raw[key] !== undefined) boolean(raw[key], key);
   if (raw.research !== undefined) {
     const research = object(raw.research, "研究");
-    for (const [key, info] of Object.entries(RESEARCH)) if (research[key] !== undefined || Number(raw.version) >= 10) number(research[key], `研究.${key}`, 0, info.costs.length, true);
+    for (const [key, info] of Object.entries(RESEARCH)) {
+      const introducedVersion = key === "fishing" ? 11 : 10;
+      if (research[key] !== undefined || Number(raw.version) >= introducedVersion) number(research[key], `研究.${key}`, 0, info.costs.length, true);
+    }
   }
   if (raw.researchInvestment !== undefined || Number(raw.version) >= 10) number(raw.researchInvestment, "研究投入");
   if (raw.orderRefreshCooldown !== undefined || Number(raw.version) >= 10) number(raw.orderRefreshCooldown, "换单冷却", 0, 300);
   if (raw.productionPlan !== undefined || Number(raw.version) >= 10) checkProductionPlan(raw.productionPlan);
   if (Number(raw.version) >= 10) object(raw.research, "研究");
+  if (raw.fishingPlots !== undefined || Number(raw.version) >= 11) {
+    for (const [plotId, value] of Object.entries(object(raw.fishingPlots, "摸鱼池收获"))) {
+      id(plotId, "摸鱼池编号");
+      if (!isValidFishingPlotState(value)) invalid("摸鱼池收获记录");
+    }
+  }
+  if (Number(raw.version) >= 11) number(object(raw.plotPurchases, "地块购买记录").fishing, "摸鱼池购买次数", 0, Number.MAX_SAFE_INTEGER, true);
+  for (const rawWorker of list(raw.workers, "人物")) {
+    const worker = object(rawWorker, "人物");
+    if (worker.fishing !== undefined) {
+      if (!isValidFishingProgress(worker.fishing)) invalid("人物垂钓进度");
+      choice(worker.status, [...WORKER_STATUSES, "dragging"], "人物状态");
+      for (const key of ["u", "v", "x", "y"]) number(worker[key], `人物位置.${key}`, -Number.MAX_SAFE_INTEGER);
+    }
+  }
   if (raw.schedulerRobots !== undefined) {
     const robots = list(raw.schedulerRobots, "机器人");
     if (raw.schedulerBots !== undefined && robots.length !== raw.schedulerBots) invalid("机器人数量");
@@ -255,6 +303,7 @@ function checkProvidedValues(raw: ObjectValue) {
       const order = object(value, "订单");
       id(order.id, "订单编号");
       number(order.remaining, "订单时间");
+      if (order.duration !== undefined) number(order.duration, "订单总时长", Math.max(Number.MIN_VALUE, order.remaining as number));
       choice(order.reward, ["coins", "special"], "订单奖励");
       if (order.rerolled !== undefined) boolean(order.rerolled, "订单已换单");
       const processed = object(order.processed, "订单加工品");
@@ -269,8 +318,8 @@ function checkProvidedValues(raw: ObjectValue) {
 
 function normalizeState(source: unknown): GameState {
   const raw = object(source, "游戏数据");
-  if (typeof raw.version === "number" && raw.version > 10) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
-  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 10) invalid("存档版本");
+  if (typeof raw.version === "number" && raw.version > 11) throw new Error("这是较新版本的存档，请更新游戏后再导入。");
+  if (!Number.isInteger(raw.version) || (raw.version as number) < 1 || (raw.version as number) > 11) invalid("存档版本");
   checkInputBounds(raw);
   if (Number(raw.version) >= 9 || raw.rebirthCount !== undefined) number(raw.rebirthCount, "转生次数", 0, 1, true);
   if (raw.schedulerBots !== undefined) number(raw.schedulerBots, "机器人数量", 1, MAX_COLLECTION_SIZE, true);
@@ -281,6 +330,11 @@ function normalizeState(source: unknown): GameState {
   if (typeof state.inventory.cans === "number" && state.inventory.cans < 0 && state.inventory.cans >= -1e-12) state.inventory.cans = 0;
   checkState(state);
   checkProvidedValues(raw);
+  if (raw.fishingPlots !== undefined) {
+    for (const plotId of Object.keys(object(raw.fishingPlots, "摸鱼池收获"))) {
+      if (!state.plots.some((plot) => plot.id === plotId && plot.type === "fishing")) invalid("摸鱼池收获引用");
+    }
+  }
   if (raw.productionPlan !== undefined) checkProductionPlan(raw.productionPlan, state);
   // Migration supplies fields introduced in later versions. Existing production
   // data must still be valid: a misspelled recipe must not silently become rough.

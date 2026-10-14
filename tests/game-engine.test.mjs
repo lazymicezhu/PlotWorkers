@@ -506,7 +506,7 @@ test("version one saves migrate plots, automation and movement state", async () 
   old.batch = { active: true, progress: .5, reservedRaw: 200 };
   delete old.processPlots;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 10);
+  assert.equal(migrated.version, 11);
   assert.equal(migrated.plots.length, 3);
   assert.equal("motion" in migrated.workers[0], false);
   assert.equal(migrated.schedulerBots, 1);
@@ -526,7 +526,7 @@ test("version one saves migrate plots, automation and movement state", async () 
 
 test("new games and elapsed simulation contain no environment system", () => {
   let game = state();
-  assert.equal(game.version, 10);
+  assert.equal(game.version, 11);
   assert.equal("environment" in game, false);
   assert.ok(game.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
   assert.ok(game.workers.every((worker) => !("recoveryRemaining" in worker)));
@@ -583,14 +583,14 @@ test("version seven saves remove environmental damage and resume existing produc
   old.processPlots.process = { recipe: "rough", produced: 7, batch: { active: true, progress: .95, reservedRaw: 75 } };
 
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 10);
+  assert.equal(migrated.version, 11);
   assert.equal("environment" in migrated, false);
   assert.ok(migrated.plots.every((plot) => !("damagedRemaining" in plot) && !("reinforcedFor" in plot)));
   assert.ok(migrated.workers.every((worker) => !("recoveryRemaining" in worker)));
   assert.deepEqual(migrated.workers.map((worker) => worker.status), ["ready", "idle", "idle", "idle"]);
   assert.deepEqual(migrated.workers.map((worker) => worker.mood), [100, 100, 100, 100]);
   assert.equal(migrated.coins, old.coins);
-  assert.deepEqual(migrated.inventory, old.inventory);
+  assert.deepEqual(migrated.inventory, { ...old.inventory, specials: { ...old.inventory.specials, orderRefresh: 0, goldenOrder: 0 } });
   assert.deepEqual(migrated.research, { ...state().research, synthesis: 2, orders: 1 });
   assert.deepEqual(migrated.processPlots, old.processPlots);
 
@@ -603,7 +603,7 @@ test("version seven saves remove environmental damage and resume existing produc
   assert.equal(next.workers[1].status, "gathering");
   assert.equal(next.workers[2].status, "processing");
   assert.equal(next.inventory.cans, old.inventory.cans);
-  assert.deepEqual(next.inventory.specials, old.inventory.specials);
+  assert.deepEqual(next.inventory.specials, { ...old.inventory.specials, orderRefresh: 0, goldenOrder: 0 });
   assert.deepEqual(parseSavedState(JSON.stringify(next)), next);
 });
 
@@ -961,7 +961,7 @@ test("saved special orders pay 1.5 times the coin reward plus one item only once
   const restored = parseSavedState(JSON.stringify(game));
   assert.equal(orderCoinReward(restored, { ...restored.orders[0], reward: "coins" }), 525);
   assert.equal(orderCoinReward(restored, restored.orders[0]), 788);
-  const delivered = submitOrder(restored, "special-order", () => 1);
+  const delivered = submitOrder(restored, "special-order", () => .5);
   assert.equal(delivered.inventory.rough, 0);
   assert.equal(delivered.inventory.screws, 0);
   assert.deepEqual(delivered.inventory.specials, { ...game.inventory.specials, holyLight: 1 });
@@ -1025,7 +1025,7 @@ test("expansion prices and permanent research scale without decreasing", () => {
   assert.equal(schedulerBotPrice(game), 4800);
   game.schedulerBots = 11;
   assert.equal(schedulerBotPrice(game), 11500);
-  assert.deepEqual(Object.keys(RESEARCH), ["gather", "process", "synthesis", "management", "planning", "orders", "negotiation", "delivery"]);
+  assert.deepEqual(Object.keys(RESEARCH), ["gather", "process", "synthesis", "management", "planning", "orders", "negotiation", "delivery", "fishing"]);
   game.coins = RESEARCH.synthesis.costs[0];
   const researched = buyResearch(game, "synthesis");
   assert.equal(researched.coins, 0);

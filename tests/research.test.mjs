@@ -6,6 +6,7 @@ import {
   cancelOrderTracking,
   createInitialState,
   orderCoinReward,
+  orderDuration,
   parseSavedState,
   recyclePlot,
   refreshOrder,
@@ -99,9 +100,53 @@ test("delivery assurance extends only newly generated order time without raising
   const extended = stepGame(base, 1, () => .9);
   assert.equal(extended.orders[0].remaining, 122);
   assert.equal(ordinary.orders[1].remaining, 300);
+  assert.equal(ordinary.orders[1].duration, 300);
   assert.equal(extended.orders[1].remaining, 390);
+  assert.equal(extended.orders[1].duration, 390);
   assert.deepEqual(extended.orders[1].processed, ordinary.orders[1].processed);
   assert.deepEqual(extended.orders[1].synthesized, ordinary.orders[1].synthesized);
+});
+
+test("an order keeps its original countdown scale through research upgrades, time and negotiation", () => {
+  let game = fresh();
+  addSynthesis(game);
+  game.orderElapsed = 179;
+  game = stepGame(game, 1, () => .9);
+  game = stepGame(game, 1, () => 1);
+  const beforeUpgrade = game.orders[0];
+  assert.equal(beforeUpgrade.remaining, 299);
+  assert.equal(orderDuration(beforeUpgrade), 300);
+  game.coins = 100_000;
+  game = buyResearch(game, "delivery");
+  game = buyResearch(game, "delivery");
+  game = buyResearch(game, "negotiation");
+  assert.equal(orderDuration(game.orders[0]), 300, "new-order research does not rescale active orders");
+  game = refreshOrder(game, beforeUpgrade.id, () => .1);
+  assert.equal(game.orders[0].remaining, 299);
+  assert.equal(game.orders[0].duration, 300, "a replacement keeps the original deadline despite new research");
+  const restored = parseSavedState(JSON.stringify(game));
+  assert.equal(orderDuration(restored.orders[0]), 300);
+  const elapsed = stepGame(restored, 1, () => 1);
+  assert.equal(elapsed.orders[0].remaining, 298);
+  assert.equal(orderDuration(elapsed.orders[0]), 300);
+});
+
+test("old orders gain a fixed inferred duration on load and malformed durations are rejected", () => {
+  const game = fresh();
+  game.research.delivery = 2;
+  game.orders = [order(), { ...order("order-2"), remaining: 380 }];
+  const restored = parseSavedState(JSON.stringify(game));
+  assert.deepEqual(restored.orders.map((item) => item.duration), [360, 380]);
+  assert.equal(game.orders[0].duration, undefined, "migration does not mutate its input");
+  restored.coins = 45_000;
+  const upgraded = buyResearch(restored, "delivery");
+  assert.deepEqual(parseSavedState(JSON.stringify(upgraded)).orders.map((item) => item.duration), [360, 380]);
+  assert.equal(orderDuration(order()), 300, "in-memory legacy fixtures have a safe baseline");
+  assert.equal(orderDuration({ ...order(), remaining: 390 }), 390);
+  for (const duration of [0, -1, 122, null, "300", NaN, Infinity]) {
+    game.orders = [{ ...order(), duration }];
+    assert.equal(parseSavedState(JSON.stringify(game)), null, `invalid duration: ${duration}`);
+  }
 });
 
 test("negotiation refresh keeps identity, reward and time while sharing a tiered cooldown", () => {
@@ -143,7 +188,7 @@ test("legacy research keeps prior spending and grandfathered robot upgrades", ()
   old.researchInvestment = 0;
   old.schedulerRobots[0].efficiency = 1.02;
   const migrated = parseSavedState(JSON.stringify(old));
-  assert.equal(migrated.version, 10);
+  assert.equal(migrated.version, 11);
   assert.equal(migrated.researchInvestment, 300_000);
   assert.equal(migrated.research.management, 1);
   assert.equal(migrated.research.gather, 0);
@@ -242,4 +287,21 @@ test("production and restoration switch recipes only after completion and carry 
   assert.ok(Math.abs(next.processPlots.process.batch.progress - .17) < 1e-10);
   assert.equal(next.inventory.raw, 725);
   assert.equal(tracked.processPlots.process.batch.progress, .95);
+});
+
+
+test("fishing is a free one-time special-plot research that keeps its unlock before placement", () => {
+  const game = fresh();
+  game.coins = 0;
+  const before = structuredClone(game);
+  const unlocked = buyResearch(game, "fishing");
+  assert.equal(RESEARCH.fishing.group, "special");
+  assert.deepEqual(RESEARCH.fishing.costs, [0]);
+  assert.equal(unlocked.research.fishing, 1);
+  assert.equal(unlocked.coins, 0);
+  assert.equal(unlocked.researchInvestment, game.researchInvestment);
+  assert.equal(unlocked.plots.filter((plot) => plot.type === "fishing").length, 0);
+  assert.equal(buyResearch(unlocked, "fishing"), unlocked, "retrying placement must not purchase another tier");
+  assert.deepEqual(parseGameSave(exportGameSave(unlocked)).state, unlocked, "cancelled placement keeps the entitlement after reload");
+  assert.deepEqual(game, before, "unlock leaves the previous game state untouched");
 });

@@ -1,15 +1,18 @@
+import { createFishingPlotState, createFishingProgress, fishingOutcomeAt, fishingSeatPoint, nearestFishingSeat, isValidFishingProgress, isValidFishingPlotState } from "./fishing.ts";
+import type { FishingProgress, FishingPlotState, FishingHistoryEntry } from "./fishing.ts";
 import type { ResourceKind } from "./resource-activity.ts";
 import { cancelProductionPlan, refreshProductionPlan, releasePlannedPlot, isPlannedPlotPaused, startOrderTracking as startOrderTrackingWithRecipes } from "./order-production-plan.ts";
 import type { ProductionPlan } from "./order-production-plan.ts";
 export { cancelProductionPlan as cancelOrderTracking, getOrderProductionStatus } from "./order-production-plan.ts";
 
-export type ZoneType = "gather" | "process" | "synthesis" | "living";
+export type ZoneType = "gather" | "process" | "synthesis" | "living" | "fishing";
 export type ZoneId = string;
 export type Personality = "leader" | "slowBurn" | "lazy";
 export type RecipeId = "rough" | "refined";
 export type SynthesisRecipeId = "cans" | "screws" | "rebar";
-export type SpecialItemId = "canOpener" | "smartLeader" | "holyLight";
-export type ResearchId = "gather" | "process" | "synthesis" | "management" | "planning" | "orders" | "negotiation" | "delivery";
+export const SPECIAL_ITEM_IDS = ["canOpener", "smartLeader", "holyLight", "orderRefresh", "goldenOrder"] as const;
+export type SpecialItemId = typeof SPECIAL_ITEM_IDS[number];
+export type ResearchId = "gather" | "process" | "synthesis" | "management" | "planning" | "orders" | "negotiation" | "delivery" | "fishing";
 export type WorkerStatus =
   | "idle"
   | "gathering"
@@ -20,6 +23,7 @@ export type WorkerStatus =
   | "exhausted"
   | "resting"
   | "ready"
+  | "fishing"
   | "dragging";
 
 export type WorkerState = {
@@ -44,6 +48,7 @@ export type WorkerState = {
   lazyCheckInterval?: number;
   slowStacks: number;
   lastWorkZoneId: ZoneId | null;
+  fishing?: FishingProgress;
 };
 
 export type PlotState = {
@@ -84,6 +89,7 @@ export type SynthesisPlotState = {
 export type OrderState = {
   id: string;
   remaining: number;
+  duration?: number;
   processed: { kind: RecipeId; amount: number };
   synthesized: { kind: "screws" | "rebar"; amount: number };
   reward: "coins" | "special";
@@ -103,7 +109,7 @@ export type TimedEffectsState = {
 };
 
 export type GameState = {
-  version: 10;
+  version: 11;
   rebirthCount: 0 | 1;
   coins: number;
   inventory: {
@@ -119,6 +125,7 @@ export type GameState = {
   workers: WorkerState[];
   processPlots: Record<ZoneId, ProcessPlotState>;
   synthesisPlots: Record<ZoneId, SynthesisPlotState>;
+  fishingPlots: Record<ZoneId, FishingPlotState>;
   market: { roughPrice: number; refinedPrice: number; elapsed: number };
   schedulerSeconds: number;
   schedulerBots: number;
@@ -166,6 +173,8 @@ export const SPECIAL_ITEM_NAMES: Record<SpecialItemId, string> = {
   canOpener: "罐头起子",
   smartLeader: "智械领袖",
   holyLight: "圣光洗礼",
+  orderRefresh: "订单刷新券",
+  goldenOrder: "黄金订单券",
 };
 
 export const RESEARCH = {
@@ -177,6 +186,7 @@ export const RESEARCH = {
   orders: { name: "订单网络", group: "commerce", description: "每级订单基础金币奖励 +10%", costs: [5_000, 15_000, 45_000, 120_000, 300_000] },
   negotiation: { name: "客户协商", group: "commerce", description: "解锁换单，冷却依次为 300 / 240 / 180 秒", costs: [3_000, 10_000, 30_000] },
   delivery: { name: "交付保障", group: "commerce", description: "新订单期限依次为 330 / 360 / 390 秒", costs: [5_000, 15_000, 45_000] },
+  fishing: { name: "摸鱼池", group: "special", description: "免费放置一块摸鱼池，手动安排最多 3 人垂钓；懒汉速度 +100%", costs: [0] },
 } as const;
 
 export const PERSONALITY_NAMES: Record<Personality, string> = {
@@ -196,6 +206,7 @@ export const STATUS_NAMES: Record<WorkerStatus, string> = {
   resting: "休息中",
   ready: "精神饱满",
   dragging: "调度中",
+  fishing: "垂钓中",
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -265,16 +276,17 @@ export function createInitialWorker(x: number, y: number): WorkerState {
 
 export function createInitialState(x: number, y: number): GameState {
   return {
-    version: 10,
+    version: 11,
     rebirthCount: 0,
     coins: 100,
-    inventory: { raw: 0, cans: 20, rough: 0, refined: 0, screws: 0, rebar: 0, specials: { canOpener: 0, smartLeader: 0, holyLight: 0 } },
+    inventory: { raw: 0, cans: 20, rough: 0, refined: 0, screws: 0, rebar: 0, specials: { canOpener: 0, smartLeader: 0, holyLight: 0, orderRefresh: 0, goldenOrder: 0 } },
     plots: INITIAL_PLOTS.map((plot) => ({ ...plot })),
     workers: [createInitialWorker(x, y)],
     processPlots: {
       process: { recipe: "rough", produced: 0, batch: { active: false, progress: 0, reservedRaw: 0 } },
     },
     synthesisPlots: {},
+    fishingPlots: {},
     market: { roughPrice: 10, refinedPrice: 30, elapsed: 0 },
     schedulerSeconds: 0,
     schedulerBots: 1,
@@ -288,11 +300,11 @@ export function createInitialState(x: number, y: number): GameState {
     orderElapsed: 0,
     orderSerial: 0,
     orderRefreshCooldown: 0,
-    research: { gather: 0, process: 0, synthesis: 0, management: 0, planning: 0, orders: 0, negotiation: 0, delivery: 0 },
+    research: { gather: 0, process: 0, synthesis: 0, management: 0, planning: 0, orders: 0, negotiation: 0, delivery: 0, fishing: 0 },
     researchInvestment: 0,
     productionPlan: null,
     effects: { canOpener: 0, smartLeader: 0, holyLight: [] },
-    plotPurchases: { gather: 0, process: 0, synthesis: 0, living: 0 },
+    plotPurchases: { gather: 0, process: 0, synthesis: 0, living: 0, fishing: 0 },
   };
 }
 
@@ -368,6 +380,7 @@ export function togglePlotEnabled(state: GameState, plotId: ZoneId): GameState {
 }
 
 export function buyCans(state: GameState, amount: number): GameState {
+  if (!Number.isSafeInteger(amount) || amount <= 0) return state;
   const cost = amount * 2;
   if (state.coins < cost) return state;
   return {
@@ -430,12 +443,19 @@ export function schedulerBotPrice(state: GameState) {
   return ceilToHundred(1000 * (1 + .45 * purchased + .06 * purchased ** 2));
 }
 
+export function plotCapacity(plot: Pick<PlotState, "type" | "cols" | "rows">) {
+  return plot.type === "fishing" ? 3 : Math.floor(plot.cols * plot.rows / 4);
+}
+
 export function nextPlotPrice(state: GameState, type: ZoneType, size: 4 | 8) {
+  if (type === "fishing") return 0;
   const purchased = Math.max(0, state.plotPurchases[type] ?? 0);
   return roundToTen(plotPurchasePrice(size) * (1 + .18 * purchased + .012 * purchased ** 2));
 }
 
 export function buyPlot(state: GameState, plot: PlotState): GameState {
+  if (state.plots.some((existing) => existing.id === plot.id)) return state;
+  if (plot.type === "fishing" && (!state.research.fishing || state.plots.some((existing) => existing.type === "fishing") || plot.cols !== 4 || plot.rows !== 4)) return state;
   const cost = nextPlotPrice(state, plot.type, plot.cols);
   if (state.coins < cost) return state;
   return {
@@ -450,6 +470,7 @@ export function buyPlot(state: GameState, plot: PlotState): GameState {
       ...state.synthesisPlots,
       [plot.id]: { recipe: "cans", produced: 0, batch: { active: false, progress: 0, reserved: {} } },
     } : state.synthesisPlots,
+    fishingPlots: plot.type === "fishing" ? { ...state.fishingPlots, [plot.id]: createFishingPlotState() } : state.fishingPlots,
     plotPurchases: { ...state.plotPurchases, [plot.type]: (state.plotPurchases[plot.type] ?? 0) + 1 },
   };
 }
@@ -509,8 +530,8 @@ export function buyResearch(state: GameState, id: ResearchId): GameState {
   return { ...state, coins: state.coins - cost, researchInvestment: state.researchInvestment + cost, research: { ...state.research, [id]: level + 1 } };
 }
 
-export function useSpecialItem(state: GameState, id: Exclude<SpecialItemId, "holyLight">): GameState {
-  if (state.inventory.specials[id] <= 0) return state;
+export function useSpecialItem(state: GameState, id: "canOpener" | "smartLeader"): GameState {
+  if ((id !== "canOpener" && id !== "smartLeader") || state.inventory.specials[id] <= 0) return state;
   return {
     ...state,
     inventory: { ...state.inventory, specials: { ...state.inventory.specials, [id]: state.inventory.specials[id] - 1 } },
@@ -572,8 +593,9 @@ export function chooseAutoDispatch(
   dutyOrder: readonly SchedulerDuty[] = ["rest", "work", "wake"],
 ): { workerId: string; targetId: string; action: "rest" | "work" | "wake" | "evacuate" } | null {
   const busy = new Set([...busyWorkerIds, ...state.workers.filter((worker) => worker.status === "dragging").map((worker) => worker.id)]);
-  const capacity = (plot: PlotState) => Math.floor(plot.cols * plot.rows / 4);
+  const capacity = plotCapacity;
   const plotsById = new Map(state.plots.map((plot) => [plot.id, plot]));
+  for (const worker of state.workers) if (worker.zoneId && plotsById.get(worker.zoneId)?.type === "fishing") busy.add(worker.id);
   const occupancyByPlot = new Map<string, number>();
   for (const worker of state.workers) {
     if (worker.zoneId) occupancyByPlot.set(worker.zoneId, (occupancyByPlot.get(worker.zoneId) ?? 0) + 1);
@@ -581,7 +603,7 @@ export function chooseAutoDispatch(
   for (const targetId of reservedTargetIds) occupancyByPlot.set(targetId, (occupancyByPlot.get(targetId) ?? 0) + 1);
   const occupancy = (plotId: string) => occupancyByPlot.get(plotId) ?? 0;
   const livingPlots = state.plots.filter((plot) => plot.type === "living" && plot.enabled !== false && occupancy(plot.id) < capacity(plot));
-  const workPlots = state.plots.filter((plot) => plot.type !== "living" && plot.enabled !== false && occupancy(plot.id) < capacity(plot));
+  const workPlots = state.plots.filter((plot) => plot.type !== "living" && plot.type !== "fishing" && plot.enabled !== false && occupancy(plot.id) < capacity(plot));
   const requiredRaw = Math.min(
     ...state.plots
       .filter((plot) => plot.type === "process" && plot.enabled !== false)
@@ -710,7 +732,14 @@ export function circleHitsPlot(x: number, y: number, radius: number, plot: PlotS
   return scaledVertices.some((start, index) => distanceToEdge(start, scaledVertices[(index + 1) % scaledVertices.length]) <= r);
 }
 
-const randomSpecial = (random: () => number): SpecialItemId => (["canOpener", "smartLeader", "holyLight"] as SpecialItemId[])[Math.min(2, Math.floor(random() * 3))];
+function randomSpecial(random: () => number): SpecialItemId {
+  const roll = random();
+  if (roll < .25) return "canOpener";
+  if (roll < .5) return "smartLeader";
+  if (roll < .75) return "holyLight";
+  if (roll < .98) return "orderRefresh";
+  return "goldenOrder";
+}
 
 function createOrder(state: GameState, random: () => number): OrderState {
   const processed: RecipeId = random() < .5 ? "rough" : "refined";
@@ -722,24 +751,32 @@ function createOrder(state: GameState, random: () => number): OrderState {
   const synthesisCapacity = synthesisWorkers * 300 / synthesisRecipe.seconds * synthesisRecipe.output;
   const processedAmount = Math.max(1, Math.floor(processedCapacity * (.3 + random() * .3)));
   const batches = Math.max(1, Math.floor(synthesisCapacity * (.3 + random() * .3) / synthesisRecipe.output));
+  const duration = 300 + state.research.delivery * 30;
   return {
     id: `order-${state.orderSerial + 1}`,
-    remaining: 300 + state.research.delivery * 30,
+    remaining: duration,
+    duration,
     processed: { kind: processed, amount: processedAmount },
     synthesized: { kind: synthesized, amount: batches * synthesisRecipe.output },
     reward: random() < .75 ? "coins" : "special",
   };
 }
 
-export function submitOrder(state: GameState, orderId: string, random = Math.random): GameState {
+function completeOrder(state: GameState, orderId: string, useGoldenTicket: boolean, random: () => number): GameState {
   const order = state.orders.find((item) => item.id === orderId);
-  if (!order || state.inventory[order.processed.kind] < order.processed.amount || state.inventory[order.synthesized.kind] < order.synthesized.amount) return state;
+  if (!order || !(order.remaining > 0)) return state;
+  if (useGoldenTicket) {
+    if (!Number.isSafeInteger(state.inventory.specials.goldenOrder) || state.inventory.specials.goldenOrder < 1) return state;
+  } else if (state.inventory[order.processed.kind] < order.processed.amount || state.inventory[order.synthesized.kind] < order.synthesized.amount) return state;
   const inventory = {
     ...state.inventory,
     specials: { ...state.inventory.specials },
-    [order.processed.kind]: state.inventory[order.processed.kind] - order.processed.amount,
-    [order.synthesized.kind]: state.inventory[order.synthesized.kind] - order.synthesized.amount,
   };
+  if (useGoldenTicket) inventory.specials.goldenOrder -= 1;
+  else {
+    inventory[order.processed.kind] -= order.processed.amount;
+    inventory[order.synthesized.kind] -= order.synthesized.amount;
+  }
   const coins = state.coins + orderCoinReward(state, order);
   if (order.reward === "special") {
     const item = randomSpecial(random);
@@ -747,6 +784,29 @@ export function submitOrder(state: GameState, orderId: string, random = Math.ran
   }
   const next = { ...state, coins, inventory, orders: state.orders.filter((item) => item.id !== orderId) };
   return state.productionPlan?.orderId === orderId ? cancelProductionPlan(next) : next;
+}
+
+export function submitOrder(state: GameState, orderId: string, random = Math.random): GameState {
+  return completeOrder(state, orderId, false, random);
+}
+
+export function useGoldenOrderTicket(state: GameState, orderId: string, random = Math.random): GameState {
+  return completeOrder(state, orderId, true, random);
+}
+
+export function useOrderRefreshTicket(state: GameState, random = Math.random): GameState {
+  if (!Number.isSafeInteger(state.inventory.specials.orderRefresh) || state.inventory.specials.orderRefresh < 1
+    || !state.plots.some((plot) => plot.type === "synthesis")) return state;
+  const orders = state.orders.filter((order) => order.remaining > 0);
+  if (orders.length >= 2) return state;
+  const next = {
+    ...state,
+    inventory: { ...state.inventory, specials: { ...state.inventory.specials, orderRefresh: state.inventory.specials.orderRefresh - 1 } },
+    orders: [...orders, createOrder(state, random)],
+    orderSerial: state.orderSerial + 1,
+  };
+  return next.productionPlan?.phase === "tracking" && !next.orders.some((order) => order.id === next.productionPlan?.orderId)
+    ? cancelProductionPlan(next) : next;
 }
 
 export function refreshOrder(state: GameState, orderId: string, random = Math.random): GameState {
@@ -757,10 +817,16 @@ export function refreshOrder(state: GameState, orderId: string, random = Math.ra
     ...state,
     orderRefreshCooldown: [300, 240, 180][state.research.negotiation - 1],
     orders: state.orders.map((item) => item.id === orderId ? {
-      ...replacement, id: order.id, reward: order.reward, remaining: order.remaining, rerolled: true,
+      ...replacement, id: order.id, reward: order.reward, remaining: order.remaining, duration: orderDuration(order), rerolled: true,
     } : item),
   };
   return state.productionPlan?.orderId === orderId ? cancelProductionPlan(next) : next;
+}
+
+export function orderDuration(order: OrderState): number {
+  return typeof order.duration === "number" && Number.isFinite(order.duration)
+    && order.duration > 0 && order.duration >= order.remaining
+    ? order.duration : Math.max(300, Number.isFinite(order.remaining) ? order.remaining : 0);
 }
 
 export function orderCoinReward(state: GameState, order: OrderState) {
@@ -770,7 +836,8 @@ export function orderCoinReward(state: GameState, order: OrderState) {
   return order.reward === "special" ? Math.ceil(standardReward * 1.5) : standardReward;
 }
 
-export function stepGame(state: GameState, seconds: number, random = Math.random, onResourceChange?: (kind: ResourceKind, delta: number) => void): GameState {
+export function stepGame(state: GameState, seconds: number, random = Math.random, onResourceChange?: (kind: ResourceKind, delta: number) => void, now = Date.now()): GameState {
+  if (!Number.isFinite(seconds)) return state;
   const dt = clamp(seconds, 0, 1);
   if (dt <= 0) return state;
   const inventory = { ...state.inventory, specials: { ...state.inventory.specials } };
@@ -796,6 +863,8 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   };
   const processPlots = Object.fromEntries(Object.entries(state.processPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch } }]));
   const synthesisPlots = Object.fromEntries(Object.entries(state.synthesisPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch, reserved: { ...value.batch.reserved } } }]));
+  const fishingPlots = { ...state.fishingPlots };
+  const fishingEvents = new Map<string, Omit<FishingHistoryEntry, "id">[]>();
   const plots = state.plots;
   const workers = state.workers.map((worker) => ({ ...worker }));
   // The planner only mutates the working copy, including its saved recovery data.
@@ -809,6 +878,38 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const productionMultiplier = (plot: PlotState, holy: boolean) => 1 + Number(holy) + Number(guarded.has(plot.id));
   for (const worker of workers) {
     if (worker.status === "dragging") continue;
+    const fishingPlot = worker.zoneId ? plotById.get(worker.zoneId) : undefined;
+    if (fishingPlot?.type === "fishing") {
+      if (fishingPlot.enabled === false) { worker.status = "idle"; continue; }
+      const seat = worker.fishing?.seat ?? nearestFishingSeat(fishingPlot, worker, workers, worker.id);
+      if (!seat) { worker.status = "idle"; continue; }
+      const previous = worker.fishing ?? createFishingProgress(seat, random);
+      const speed = worker.personality === "lazy" ? 2 : 1;
+      let elapsed = previous.elapsed + dt * speed;
+      let cycle = previous.cycle;
+      let outcome = previous.outcome;
+      const events = fishingEvents.get(fishingPlot.id) ?? [];
+      while (elapsed + 1e-9 >= 60) {
+        elapsed = Math.max(0, elapsed - 60);
+        if (outcome.itemId && outcome.quantity === 1) {
+          if (outcome.kind === "product") {
+            const item = outcome.itemId as "rough" | "refined" | "screws" | "rebar" | "cans";
+            inventory[item] += 1;
+            onResourceChange?.(item, 1);
+          } else inventory.specials[outcome.itemId as SpecialItemId] += 1;
+        }
+        events.push({ ...outcome, caughtAt: Math.max(0, (Number.isFinite(now) ? now : Date.now()) - elapsed / speed * 1000) });
+        cycle += 1;
+        outcome = fishingOutcomeAt(previous.seed, cycle);
+      }
+      if (events.length) fishingEvents.set(fishingPlot.id, events);
+      worker.fishing = { ...previous, seat, elapsed, cycle, outcome };
+      Object.assign(worker, fishingSeatPoint(fishingPlot, seat));
+      worker.status = "fishing";
+      worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
+      delete worker.lazyCheckInterval;
+      continue;
+    }
     if (isForeman(worker)) {
       worker.mood = 100;
       worker.continuousWork = worker.slowStacks = worker.lazyElapsed = 0;
@@ -963,6 +1064,13 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     } else for (const worker of group) if (worker.status !== "slacking" && worker.status !== "exhausted") worker.status = "waiting";
   }
 
+  for (const [plotId, events] of fishingEvents) {
+    const previous = fishingPlots[plotId] ?? createFishingPlotState();
+    let nextCatchId = previous.nextCatchId;
+    const additions = events.sort((a, b) => a.caughtAt - b.caughtAt).map((entry) => ({ ...entry, id: nextCatchId++ }));
+    fishingPlots[plotId] = { history: [...previous.history, ...additions].slice(-20), nextCatchId };
+  }
+
   const orders = state.orders.map((order) => ({ ...order, remaining: order.remaining - dt })).filter((order) => order.remaining > 0).slice(0, 2);
   let orderElapsed = Math.min(180, state.orderElapsed + dt);
   let orderSerial = state.orderSerial;
@@ -973,7 +1081,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
     orderElapsed = 0;
   }
   const canOpenerSeconds = Math.max(0, state.canOpenerSeconds - dt);
-  const next = { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, orders, orderElapsed, orderSerial, effects, orderRefreshCooldown: Math.max(0, state.orderRefreshCooldown - dt) };
+  const next = { ...state, coins, inventory, workers, plots, processPlots, synthesisPlots, fishingPlots, market, schedulerSeconds, canOpenerSeconds, canOpenerCooldown: 0, orders, orderElapsed, orderSerial, effects, orderRefreshCooldown: Math.max(0, state.orderRefreshCooldown - dt) };
   // Expiry uses the same safe batch-boundary recovery as manual cancellation.
   if (next.productionPlan?.phase === "tracking" && !orders.some((order) => order.id === next.productionPlan?.orderId)) return cancelProductionPlan(next);
   refreshProductionPlan(next, SYNTHESIS_RECIPES);
@@ -999,7 +1107,7 @@ export function parseSavedState(value: string | null): GameState | null {
       batch?: ProcessPlotState["batch"];
     };
     if (
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(parsed.version ?? 0) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(parsed.version ?? 0) ||
       !Number.isFinite(parsed.coins) ||
       !Array.isArray(parsed.workers) ||
       !parsed.inventory ||
@@ -1007,6 +1115,14 @@ export function parseSavedState(value: string | null): GameState | null {
       ((parsed.version ?? 0) >= 3 && !parsed.processPlots) ||
       ((parsed.version ?? 0) < 3 && !parsed.batch)
     ) return null;
+    const savedSpecials = parsed.inventory.specials;
+    if (savedSpecials !== undefined && (!savedSpecials || typeof savedSpecials !== "object" || Array.isArray(savedSpecials))) return null;
+    const specials = {} as Record<SpecialItemId, number>;
+    for (const id of SPECIAL_ITEM_IDS) {
+      const count = savedSpecials?.[id];
+      if (count !== undefined && (!Number.isSafeInteger(count) || count < 0)) return null;
+      specials[id] = count ?? 0;
+    }
     if (parsed.workers.some((worker) => worker.role !== undefined && worker.role !== "foreman")) return null;
     const foremanCount = parsed.workers.filter(isForeman).length;
     if (foremanCount > 1) return null;
@@ -1041,7 +1157,7 @@ export function parseSavedState(value: string | null): GameState | null {
       delete restored.reinforcedFor;
       return {
         ...restored,
-        purchasePrice: Number.isFinite(plot.purchasePrice) && plot.purchasePrice > 0
+        purchasePrice: plot.type === "fishing" ? 0 : Number.isFinite(plot.purchasePrice) && plot.purchasePrice > 0
           ? plot.purchasePrice
           : plotPurchasePrice(plot.cols),
         enabled: plot.enabled !== false,
@@ -1113,6 +1229,16 @@ export function parseSavedState(value: string | null): GameState | null {
     // Prior versions allowed robot upgrades without this research. Keep those
     // upgrades available, while excluding the free unlock from asset value.
     if (legacyResearch && schedulerRobots.some((robot) => robot.efficiency > 1 || robot.intervalSeconds < 3)) research.management = 1;
+    const savedOrders = Array.isArray(parsed.orders) ? parsed.orders : [];
+    if (savedOrders.some((order) => order?.duration !== undefined && (
+      !Number.isFinite(order.duration) || order.duration <= 0 || order.duration < order.remaining
+    ))) return null;
+    // Old saves did not record their original deadline. Infer it once so later
+    // delivery research upgrades cannot change an existing countdown's scale.
+    const orders = savedOrders.filter((order) => order && order.remaining > 0).slice(0, 2).map((order) => ({
+      ...order,
+      duration: order.duration ?? Math.max(300 + research.delivery * 30, order.remaining),
+    }));
     const oldResearchCosts = [50_000, 200_000, 800_000, 3_200_000, 12_800_000];
     const researchInvestment = legacyResearch
       ? [research.synthesis, research.orders].reduce((total, level) => total + oldResearchCosts.slice(0, level).reduce((sum, cost) => sum + cost, 0), 0)
@@ -1132,13 +1258,42 @@ export function parseSavedState(value: string | null): GameState | null {
       || !Object.values(productionPlan.synthesis).every((recipe) => recipe === "cans" || recipe === "screws" || recipe === "rebar")
       || !Array.isArray(productionPlan.pausedPlotIds) || !productionPlan.pausedPlotIds.every((id) => typeof id === "string")
     )) return null;
+    const fishingPlotList = plots.filter((plot) => plot.type === "fishing");
+    if (fishingPlotList.length > 1 || fishingPlotList.some((plot) => plot.cols !== 4 || plot.rows !== 4) || (fishingPlotList.length > 0 && !research.fishing)) return null;
+    const savedFishingPlots = parsed.fishingPlots;
+    if ((parsed.version ?? 0) >= 11 && (!savedFishingPlots || typeof savedFishingPlots !== "object" || Array.isArray(savedFishingPlots))) return null;
+    const fishingPlots: Record<string, FishingPlotState> = {};
+    if (savedFishingPlots !== undefined) {
+      if (!savedFishingPlots || typeof savedFishingPlots !== "object" || Array.isArray(savedFishingPlots)
+        || Object.keys(savedFishingPlots).some((id) => zoneTypes.get(id) !== "fishing")) return null;
+      for (const plot of fishingPlotList) {
+        const saved = savedFishingPlots[plot.id];
+        if (!isValidFishingPlotState(saved)) return null;
+        fishingPlots[plot.id] = structuredClone(saved);
+      }
+    } else if (fishingPlotList.length > 0) return null;
+    const occupiedFishingSeats = new Map<string, Set<string>>();
+    for (const worker of parsed.workers) {
+      if (worker.fishing !== undefined && !isValidFishingProgress(worker.fishing)) return null;
+      const inPond = Boolean(worker.zoneId && zoneTypes.get(worker.zoneId) === "fishing");
+      if (!inPond) {
+        if (worker.status === "fishing") return null;
+        continue;
+      }
+      if (!worker.fishing) return null;
+      const seats = occupiedFishingSeats.get(worker.zoneId!) ?? new Set<string>();
+      if (seats.has(worker.fishing.seat) || seats.size >= 3) return null;
+      seats.add(worker.fishing.seat);
+      occupiedFishingSeats.set(worker.zoneId!, seats);
+    }
     return {
-      version: 10,
+      version: 11,
       rebirthCount,
       coins: parsed.coins!,
       plots,
       processPlots,
       synthesisPlots,
+      fishingPlots,
       schedulerSeconds: Number.isFinite(parsed.schedulerSeconds) ? parsed.schedulerSeconds! : 0,
       schedulerBots,
       schedulerRobots,
@@ -1154,11 +1309,7 @@ export function parseSavedState(value: string | null): GameState | null {
         refined: parsed.inventory.refined,
         screws: Number.isFinite(parsed.inventory.screws) ? parsed.inventory.screws : 0,
         rebar: Number.isFinite(parsed.inventory.rebar) ? parsed.inventory.rebar : 0,
-        specials: {
-          canOpener: Number.isFinite(parsed.inventory.specials?.canOpener) ? parsed.inventory.specials!.canOpener : 0,
-          smartLeader: Number.isFinite(parsed.inventory.specials?.smartLeader) ? parsed.inventory.specials!.smartLeader : 0,
-          holyLight: Number.isFinite(parsed.inventory.specials?.holyLight) ? parsed.inventory.specials!.holyLight : 0,
-        },
+        specials,
       },
       market: {
         ...parsed.market!,
@@ -1177,20 +1328,23 @@ export function parseSavedState(value: string | null): GameState | null {
           delete restored.lazyCheckInterval;
         }
         if (isForeman(worker)) restored.continuousWork = restored.slowStacks = 0;
-        const mood = wasInjured || isForeman(worker) ? 100 : worker.mood;
-        const status: WorkerStatus = wasInjured || worker.status === "dragging" || (isForeman(worker) && (worker.status === "slacking" || worker.status === "exhausted"))
+        const fishingPlot = plots.find((plot) => plot.id === worker.zoneId && plot.type === "fishing");
+        const mood = wasInjured || (isForeman(worker) && !fishingPlot) ? 100 : worker.mood;
+        const status: WorkerStatus = fishingPlot ? (fishingPlot.enabled === false ? "idle" : "fishing") : wasInjured || worker.status === "dragging" || (isForeman(worker) && (worker.status === "slacking" || worker.status === "exhausted"))
           ? worker.zoneId && zoneTypes.get(worker.zoneId) === "living"
             ? (mood >= 100 ? "ready" : "resting")
             : mood <= 0 ? "exhausted" : "idle"
           : worker.status as WorkerStatus;
         return {
           ...restored,
+          ...(worker.fishing ? { fishing: structuredClone(worker.fishing) } : {}),
+          ...(fishingPlot && worker.fishing ? fishingSeatPoint(fishingPlot, worker.fishing.seat) : {}),
           mood,
           status,
           lastWorkZoneId: worker.lastWorkZoneId ?? null,
         };
       }),
-      orders: Array.isArray(parsed.orders) ? parsed.orders.filter((order) => order && order.remaining > 0).slice(0, 2) : [],
+      orders,
       orderElapsed: Number.isFinite(parsed.orderElapsed) ? clamp(parsed.orderElapsed!, 0, 180) : 0,
       orderSerial: Number.isFinite(parsed.orderSerial) ? Math.max(0, Math.floor(parsed.orderSerial!)) : 0,
       orderRefreshCooldown: orderRefreshCooldown!,
@@ -1202,12 +1356,12 @@ export function parseSavedState(value: string | null): GameState | null {
         smartLeader: Math.max(0, parsed.effects?.smartLeader ?? 0),
         holyLight,
       },
-      plotPurchases: parsed.plotPurchases ?? {
+      plotPurchases: { ...(parsed.plotPurchases ?? {
         gather: Math.max(0, plots.filter((plot) => plot.type === "gather").length - 1),
         process: Math.max(0, plots.filter((plot) => plot.type === "process").length - 1),
         synthesis: plots.filter((plot) => plot.type === "synthesis").length,
         living: Math.max(0, plots.filter((plot) => plot.type === "living").length - 1),
-      },
+      }), fishing: parsed.plotPurchases?.fishing ?? plots.filter((plot) => plot.type === "fishing").length },
     };
   } catch {
     return null;

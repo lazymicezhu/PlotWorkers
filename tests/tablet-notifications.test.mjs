@@ -18,6 +18,8 @@ test("initial loads establish a quiet baseline including already ready orders an
   game.inventory.rough = 10;
   game.inventory.screws = 5;
   game.inventory.specials.holyLight = 2;
+  game.inventory.specials.orderRefresh = 3;
+  game.inventory.specials.goldenOrder = 1;
   const baseline = snapshotTabletNotifications(game);
 
   assert.deepEqual(reconcileTabletNotifications(baseline, game).pages, []);
@@ -62,7 +64,7 @@ test("both order requirements must be met and later replenishment does not repea
 });
 
 test("special item gains notify, consumption does not, and later gains use the latest balance", () => {
-  for (const id of ["canOpener", "smartLeader", "holyLight"]) {
+  for (const id of ["canOpener", "smartLeader", "holyLight", "orderRefresh", "goldenOrder"]) {
     const game = fresh();
     game.inventory.specials[id] = 5;
     const baseline = snapshotTabletNotifications(game);

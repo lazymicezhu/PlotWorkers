@@ -1,0 +1,23 @@
+.debug { min-width: 0; }
+.debug h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.categories { display: flex; gap: 4px; margin: 8px 0 12px; padding: 4px; border-radius: 9px; background: #f3f6f0; }
+.categories button { flex: 1; min-height: 34px; padding: 5px 10px; border: 0; border-radius: 6px; background: transparent; color: #7b877d; font: inherit; cursor: pointer; }
+.categories button[aria-pressed="true"] { background: #fff; color: #526f49; box-shadow: 0 1px 4px #29372c0d; }
+.field { display: flex; flex-direction: column; gap: 6px; color: #7b877d; font-size: 12px; }
+.field + .field { margin-top: 10px; }
+.fieldHeading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.fieldHeading span { color: #354439; font-variant-numeric: tabular-nums; }
+.field input, .field select { width: 100%; min-width: 0; min-height: 40px; box-sizing: border-box; padding: 8px 10px; border: 1px solid #dfe6da; border-radius: 8px; background: #fff; color: #354439; font: inherit; font-size: 14px; line-height: 1.4; }
+.balance { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0; color: #7b877d; font-size: 12px; }
+.balance strong { color: #354439; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.presets button { min-height: 28px; padding: 3px 10px; border: 1px solid #e9ede7; border-radius: 6px; background: #fff; color: #7b877d; font: inherit; font-size: 12px; cursor: pointer; }
+.presets button[aria-pressed="true"] { border-color: #cad8c2; background: #edf2e9; color: #526f49; }
+.presets span { color: #7b877d; font-size: 11px; }
+.add { width: 100%; }
+.research { margin-top: 12px; padding-top: 8px; border-top: 1px solid #e9ede7; }
+.sectionHead { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.sectionHead span, .research p { color: #7b877d; font-size: 12px; }
+.research p { margin: 5px 0 10px; }
+.researchActions { display: flex; gap: 10px; }
+.researchActions button { min-height: 40px; padding: 8px; font-size: 13px; }

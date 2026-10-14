@@ -1,4 +1,4 @@
-import type { GameState, OrderState, SpecialItemId } from "./game-engine.ts";
+import { SPECIAL_ITEM_IDS, type GameState, type OrderState, type SpecialItemId } from "./game-engine.ts";
 
 export type TabletNotificationPage = "orders" | "inventory";
 
@@ -7,8 +7,6 @@ export type TabletNotificationSnapshot = {
   readySeenIds: readonly string[];
   specials: Readonly<Record<SpecialItemId, number>>;
 };
-
-const specialItemIds: readonly SpecialItemId[] = ["canOpener", "smartLeader", "holyLight"];
 
 function isOrderReady(game: GameState, order: OrderState) {
   return game.inventory[order.processed.kind] >= order.processed.amount
@@ -46,7 +44,7 @@ export function reconcileTabletNotifications(
 
   const pages: TabletNotificationPage[] = [];
   if (ordersChanged) pages.push("orders");
-  if (specialItemIds.some((id) => game.inventory.specials[id] > previous.specials[id])) {
+  if (SPECIAL_ITEM_IDS.some((id) => game.inventory.specials[id] > previous.specials[id])) {
     pages.push("inventory");
   }
 

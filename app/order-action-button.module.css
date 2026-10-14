@@ -1,0 +1,4 @@
+.trigger { display:inline-flex; flex:none; border-radius:6px; }
+.trigger > button:disabled { pointer-events:none; }
+.trigger:focus-visible { outline:2px solid #7d946f; outline-offset:3px; }
+.tooltip { position:fixed; z-index:10000; box-sizing:border-box; width:max-content; max-width:min(280px,calc(100vw - 16px)); max-height:calc(100dvh - 16px); overflow:auto; padding:8px 11px; border:1px solid #cdd8c1; border-radius:8px; background:#fffef9; color:#506344; box-shadow:0 4px 16px #34472e24; font:12px/1.6 Arial,"PingFang SC","Microsoft YaHei",sans-serif; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }

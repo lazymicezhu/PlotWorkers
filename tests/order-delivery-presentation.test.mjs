@@ -13,13 +13,14 @@ test("a synchronous successful trade removes the real order immediately and repe
   const gate = createOrderDeliveryGate();
   let held;
   let commits = 0;
-  const commit = () => {
+  const commit = (accepted) => {
     commits++;
     // This also covers re-entry before the first event has returned.
     assert.equal(gate.attempt("order-1", () => assert.fail("duplicate preparation"), commit), "duplicate");
-    assert.equal(held.id, "order-1", "the UI snapshot exists before a synchronous state flush");
     const next = submitOrder(game, "order-1", () => 0);
     const success = next !== game;
+    if (success) accepted();
+    assert.equal(held.id, "order-1", "the accepted snapshot exists before publishing the transaction");
     game = next;
     return success;
   };
@@ -39,16 +40,20 @@ test("a rejected trade unlocks retries without spending stock or claiming a succ
   game.orders = [order("order-1")];
   const original = game;
   const gate = createOrderDeliveryGate();
-  const commit = () => {
+  let prepared = 0;
+  const commit = (accepted) => {
     const next = submitOrder(game, "order-1", () => 0);
     const success = next !== game;
+    if (success) accepted();
     game = next;
     return success;
   };
-  assert.equal(gate.attempt("order-1", () => {}, commit), "failed");
+  assert.equal(gate.attempt("order-1", () => { prepared++; }, commit), "failed");
+  assert.equal(prepared, 0, "a rejected trade must not enter its exit animation");
   assert.equal(game, original);
   game = { ...game, inventory: { ...game.inventory, rough: 10, screws: 5 } };
-  assert.equal(gate.attempt("order-1", () => {}, commit), "success");
+  assert.equal(gate.attempt("order-1", () => { prepared++; }, commit), "success");
+  assert.equal(prepared, 1);
   assert.equal(game.orders.length, 0);
   assert.equal(game.inventory.rough, 0);
   assert.equal(game.inventory.screws, 0);

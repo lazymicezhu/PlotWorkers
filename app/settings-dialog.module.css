@@ -35,6 +35,10 @@
 .switch:checked { background: #5c7752; }
 .switch:checked::before { transform: translateX(13px); }
 .space { margin-top: 28px; }
+.passwordField { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; color: #7b877d; font-size: 12px; }
+.passwordField input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid #dfe6da; border-radius: 8px; background: #fff; color: #354439; font: inherit; font-size: 16px; }
+.passwordField input[aria-invalid="true"] { border-color: #a65950; }
+.passwordForm { min-width: 0; }
 
 @media (max-width: 480px) {
   .row { gap: 7px; }

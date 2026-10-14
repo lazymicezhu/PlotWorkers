@@ -1,0 +1,439 @@
+{
+  "version": 1,
+  "seat": "left",
+  "image": "fishing-left.png",
+  "source": "fishing-left-source.png",
+  "sourceHash": "e4ff2a9c0aea5798a4620fa843debca63e18dc148f1a398201b0a9c748ed7201",
+  "width": 2048,
+  "height": 2048,
+  "cellSize": 512,
+  "columns": 4,
+  "rows": 4,
+  "hip": [
+    256,
+    340
+  ],
+  "frames": [
+    {
+      "index": 0,
+      "x": 0,
+      "y": 0,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        482,
+        293
+      ],
+      "sourceRect": {
+        "left": 72,
+        "top": 94,
+        "width": 264,
+        "height": 230
+      },
+      "sourceHip": [
+        104,
+        252
+      ],
+      "opaquePixels": 22037
+    },
+    {
+      "index": 1,
+      "x": 512,
+      "y": 0,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        448,
+        204
+      ],
+      "sourceRect": {
+        "left": 366,
+        "top": 84,
+        "width": 243,
+        "height": 239
+      },
+      "sourceHip": [
+        411,
+        249
+      ],
+      "opaquePixels": 23921
+    },
+    {
+      "index": 2,
+      "x": 1024,
+      "y": 0,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        383,
+        114
+      ],
+      "sourceRect": {
+        "left": 659,
+        "top": 14,
+        "width": 210,
+        "height": 309
+      },
+      "sourceHip": [
+        722,
+        246
+      ],
+      "opaquePixels": 25212
+    },
+    {
+      "index": 3,
+      "x": 1536,
+      "y": 0,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        480,
+        213
+      ],
+      "sourceRect": {
+        "left": 1000,
+        "top": 88,
+        "width": 245,
+        "height": 236
+      },
+      "sourceHip": [
+        1015,
+        253
+      ],
+      "opaquePixels": 22805
+    },
+    {
+      "index": 4,
+      "x": 0,
+      "y": 512,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        485,
+        301
+      ],
+      "sourceRect": {
+        "left": 62,
+        "top": 391,
+        "width": 265,
+        "height": 237
+      },
+      "sourceHip": [
+        92,
+        552
+      ],
+      "opaquePixels": 23000
+    },
+    {
+      "index": 5,
+      "x": 512,
+      "y": 512,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        490,
+        297
+      ],
+      "sourceRect": {
+        "left": 369,
+        "top": 394,
+        "width": 278,
+        "height": 235
+      },
+      "sourceHip": [
+        407,
+        557
+      ],
+      "opaquePixels": 22829
+    },
+    {
+      "index": 6,
+      "x": 1024,
+      "y": 512,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        484,
+        286
+      ],
+      "sourceRect": {
+        "left": 677,
+        "top": 390,
+        "width": 268,
+        "height": 238
+      },
+      "sourceHip": [
+        711,
+        552
+      ],
+      "opaquePixels": 23254
+    },
+    {
+      "index": 7,
+      "x": 1536,
+      "y": 512,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        434,
+        189
+      ],
+      "sourceRect": {
+        "left": 980,
+        "top": 376,
+        "width": 245,
+        "height": 248
+      },
+      "sourceHip": [
+        1040,
+        547
+      ],
+      "opaquePixels": 24741
+    },
+    {
+      "index": 8,
+      "x": 0,
+      "y": 1024,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        492,
+        305
+      ],
+      "sourceRect": {
+        "left": 69,
+        "top": 703,
+        "width": 271,
+        "height": 231
+      },
+      "sourceHip": [
+        98,
+        856
+      ],
+      "opaquePixels": 23503
+    },
+    {
+      "index": 9,
+      "x": 512,
+      "y": 1024,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        409,
+        124
+      ],
+      "sourceRect": {
+        "left": 353,
+        "top": 638,
+        "width": 234,
+        "height": 296
+      },
+      "sourceHip": [
+        426,
+        859
+      ],
+      "opaquePixels": 25246
+    },
+    {
+      "index": 10,
+      "x": 1024,
+      "y": 1024,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        416,
+        127
+      ],
+      "sourceRect": {
+        "left": 670,
+        "top": 641,
+        "width": 213,
+        "height": 293
+      },
+      "sourceHip": [
+        715,
+        859
+      ],
+      "opaquePixels": 24410
+    },
+    {
+      "index": 11,
+      "x": 1536,
+      "y": 1024,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        366,
+        104
+      ],
+      "sourceRect": {
+        "left": 978,
+        "top": 618,
+        "width": 215,
+        "height": 313
+      },
+      "sourceHip": [
+        1045,
+        859
+      ],
+      "opaquePixels": 25197
+    },
+    {
+      "index": 12,
+      "x": 0,
+      "y": 1536,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        403,
+        113
+      ],
+      "sourceRect": {
+        "left": 61,
+        "top": 928,
+        "width": 204,
+        "height": 306
+      },
+      "sourceHip": [
+        110,
+        1160
+      ],
+      "opaquePixels": 26463
+    },
+    {
+      "index": 13,
+      "x": 512,
+      "y": 1536,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        399,
+        130
+      ],
+      "sourceRect": {
+        "left": 378,
+        "top": 941,
+        "width": 191,
+        "height": 293
+      },
+      "sourceHip": [
+        418,
+        1157
+      ],
+      "opaquePixels": 25950
+    },
+    {
+      "index": 14,
+      "x": 1024,
+      "y": 1536,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        472,
+        259
+      ],
+      "sourceRect": {
+        "left": 677,
+        "top": 999,
+        "width": 261,
+        "height": 235
+      },
+      "sourceHip": [
+        716,
+        1162
+      ],
+      "opaquePixels": 23338
+    },
+    {
+      "index": 15,
+      "x": 1536,
+      "y": 1536,
+      "width": 512,
+      "height": 512,
+      "hip": [
+        256,
+        340
+      ],
+      "rodTip": [
+        483,
+        291
+      ],
+      "sourceRect": {
+        "left": 985,
+        "top": 1006,
+        "width": 261,
+        "height": 233
+      },
+      "sourceHip": [
+        1013,
+        1165
+      ],
+      "opaquePixels": 22206
+    }
+  ],
+  "registration": "constant original scale; per-pose hip translation; full rod preserved",
+  "alphaCleanup": {
+    "threshold": 3,
+    "pixels": 101574
+  }
+}

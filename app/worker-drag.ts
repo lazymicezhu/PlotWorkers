@@ -1,5 +1,6 @@
-import type { PlotState, WorkerState } from "./game-engine.ts";
+import { plotCapacity, type PlotState, type WorkerState } from "./game-engine.ts";
 import type { CanvasPoint } from "./worker-canvas-motion.ts";
+import { createFishingProgress, fishingSeatPoint, nearestFishingSeat, pointInFishingPlot } from "./fishing.ts";
 
 export function workerAtPoint(worker: WorkerState, point: CanvasPoint, plot?: PlotState): WorkerState {
   if (!plot) return { ...worker, ...point };
@@ -14,6 +15,7 @@ export function resolveWorkerDrop(worker: WorkerState, origin: WorkerState, poin
   const restore = (notice: string | null = null) => ({ worker: { ...origin, duration: 500 }, accepted: false, notice });
   if (!moved) return restore();
   const target = plots.find((plot) => {
+    if (plot.type === "fishing") return pointInFishingPlot(plot, point);
     const local = workerAtPoint(worker, point, plot);
     return local.u >= 0 && local.u <= plot.cols && local.v >= 0 && local.v <= plot.rows;
   });
@@ -23,8 +25,21 @@ export function resolveWorkerDrop(worker: WorkerState, origin: WorkerState, poin
   for (const transfer of incoming) {
     if (transfer.workerId !== worker.id && transfer.targetId === target.id && transfer.action !== "wake") occupants.add(transfer.workerId);
   }
-  const capacity = Math.floor(target.cols * target.rows / 4);
+  const capacity = plotCapacity(target);
   if (occupants.size >= capacity) return restore(`${target.name}已达到${capacity}人上限（含正在搬入）`);
+  if (target.type === "fishing") {
+    const seat = nearestFishingSeat(target, point, workers, worker.id);
+    if (!seat) return restore("摸鱼池的 3 个钓位已坐满");
+    return {
+      accepted: true, notice: null,
+      worker: {
+        ...worker, zoneId: target.id, ...fishingSeatPoint(target, seat),
+        fishing: { ...(worker.fishing ?? createFishingProgress(seat)), seat },
+        status: "fishing", duration: 500, facing: seat === "right" ? "left" : "right",
+        continuousWork: 0, slowStacks: 0, lazyElapsed: 0, lazyCheckInterval: undefined,
+      },
+    };
+  }
   const local = workerAtPoint(worker, point, target);
   const u = Math.max(.4, Math.min(target.cols - .4, local.u));
   const v = Math.max(.4, Math.min(target.rows - .4, local.v));
@@ -38,7 +53,7 @@ export function resolveWorkerDrop(worker: WorkerState, origin: WorkerState, poin
       y: target.y + (u + v) * 27,
       duration: 500, facing: point.x < origin.x ? "left" : "right",
       status: target.type === "living" ? (worker.mood >= 100 ? "ready" : "resting") : worker.mood <= 0 ? "exhausted" : "idle",
-      lastWorkZoneId: target.type === "living" ? (source && source.type !== "living" ? source.id : worker.lastWorkZoneId) : target.id,
+      lastWorkZoneId: target.type === "living" ? (source && source.type !== "living" && source.type !== "fishing" ? source.id : worker.lastWorkZoneId) : target.id,
       continuousWork: changedZone ? 0 : worker.continuousWork,
       slowStacks: changedZone ? 0 : worker.slowStacks,
       lazyElapsed: 0, lazyCheckInterval: undefined,

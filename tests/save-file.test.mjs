@@ -12,11 +12,11 @@ function advancedSave() {
   game = buyResearch(game, "management");
   game = upgradeSchedulerEfficiency(game, 0);
   game = buyResearch(game, "synthesis");
-  game.inventory = { ...game.inventory, raw: 5432, rough: 99, refined: 51, screws: 24, rebar: 12, specials: { canOpener: 1, smartLeader: 2, holyLight: 3 } };
+  game.inventory = { ...game.inventory, raw: 5432, rough: 99, refined: 51, screws: 24, rebar: 12, specials: { canOpener: 1, smartLeader: 2, holyLight: 3, orderRefresh: 4, goldenOrder: 1 } };
   game.plots.push({ id: "synthesis-1", name: "合成区", type: "synthesis", x: 5, y: -20, cols: 4, rows: 4, purchasePrice: 300, enabled: true });
   game.processPlots.process = { recipe: "refined", produced: 12, batch: { active: true, progress: .55, reservedRaw: 200 } };
   game.synthesisPlots["synthesis-1"] = { recipe: "rebar", produced: 30, batch: { active: true, progress: .42, reserved: { rough: 10, refined: 5, screws: 2 } } };
-  game.orders = [{ id: "order-1", remaining: 178, processed: { kind: "rough", amount: 20 }, synthesized: { kind: "rebar", amount: 10 }, reward: "special" }];
+  game.orders = [{ id: "order-1", remaining: 178, duration: 300, processed: { kind: "rough", amount: 20 }, synthesized: { kind: "rebar", amount: 10 }, reward: "special" }];
   game.orderSerial = 1;
   game.effects = { canOpener: 45, smartLeader: 150, holyLight: [{ id: "holy-light", x: -5, y: 30, remaining: 100 }] };
   game.autoCanSupply = true;
@@ -101,20 +101,73 @@ test("bare legacy version 1 migrates original recipe, batch and retired injury",
   delete legacy.plotPurchases;
   const { state, exportedAt } = parseGameSave(JSON.stringify(legacy));
   assert.equal(exportedAt, null);
-  assert.equal(state.version, 10);
+  assert.equal(state.version, 11);
   assert.equal(state.processPlots.process.recipe, "refined");
   assert.deepEqual(state.processPlots.process.batch, legacy.batch);
   assert.equal(state.workers[0].status, "ready");
   assert.equal(state.workers[0].mood, 100);
-  assert.deepEqual(state.inventory.specials, { canOpener: 0, smartLeader: 0, holyLight: 0 });
+  assert.deepEqual(state.inventory.specials, { canOpener: 0, smartLeader: 0, holyLight: 0, orderRefresh: 0, goldenOrder: 0 });
+});
+
+test("existing version ten saves gain empty ticket balances without changing owned items", () => {
+  const game = advancedSave();
+  delete game.inventory.specials.orderRefresh;
+  delete game.inventory.specials.goldenOrder;
+  const loaded = parse(game);
+  assert.equal(loaded.version, 11);
+  assert.deepEqual(loaded.inventory.specials, { canOpener: 1, smartLeader: 2, holyLight: 3, orderRefresh: 0, goldenOrder: 0 });
+  assert.deepEqual(loaded.orders, game.orders);
+  assert.equal(loaded.coins, game.coins);
+});
+
+test("ticket balances must be nonnegative safe integers when provided", () => {
+  for (const id of ["orderRefresh", "goldenOrder"]) {
+    for (const value of [-1, 0.5, null, "1", Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+      const game = initial();
+      game.inventory.specials[id] = value;
+      assert.throws(() => parse(game), /无效|不完整/, `${id}: ${value}`);
+      assert.throws(() => exportGameSave(game), /无效|不完整/, `${id}: ${value}`);
+    }
+    const game = initial();
+    game.inventory.specials[id] = Number.MAX_SAFE_INTEGER;
+    assert.equal(parseGameSave(exportGameSave(game)).state.inventory.specials[id], Number.MAX_SAFE_INTEGER);
+  }
+});
+
+test("order countdown duration survives exports and older saves infer it only once", () => {
+  const game = advancedSave();
+  game.research.delivery = 3;
+  assert.equal(parseGameSave(exportGameSave(game)).state.orders[0].duration, 300, "new research does not extend an existing deadline");
+  delete game.orders[0].duration;
+  const migrated = parseGameSave(exportGameSave(game)).state;
+  assert.equal(migrated.orders[0].duration, 390);
+  assert.equal(migrated.orders[0].remaining, 178);
+  assert.equal(game.orders[0].duration, undefined, "export preserves the live legacy object");
+  migrated.research.delivery = 0;
+  assert.equal(parseGameSave(exportGameSave(migrated)).state.orders[0].duration, 390);
+});
+
+test("order durations must be positive, finite and at least the remaining countdown", () => {
+  for (const duration of [0, -1, 177.9, null, "300", NaN, Infinity]) {
+    const game = advancedSave();
+    game.orders[0].duration = duration;
+    assert.throws(() => parse(game), /无效|不完整/, `import duration: ${duration}`);
+    assert.throws(() => exportGameSave(game), /无效|不完整/, `export duration: ${duration}`);
+  }
+  const game = advancedSave();
+  game.orders[0].duration = 178;
+  assert.equal(parseGameSave(exportGameSave(game)).state.orders[0].duration, 178);
+  game.orders[0].remaining = 0;
+  game.orders[0].duration = 0;
+  assert.throws(() => parse(game), /无效|不完整/, "expired orders cannot hide an invalid provided duration");
 });
 
 test("all supported bare save versions can be loaded", () => {
-  for (let version = 1; version <= 10; version++) {
+  for (let version = 1; version <= 11; version++) {
     const game = initial();
     game.version = version;
     if (version < 3) game.batch = { active: false, progress: 0, reservedRaw: 0 };
-    assert.equal(parse(game).version, 10);
+    assert.equal(parse(game).version, 11);
   }
 });
 
@@ -128,7 +181,7 @@ test("malformed JSON, unrelated packages and future formats are rejected with pl
   for (const value of ["", "not json", "{broken", "null", "[]"]) assert.throws(() => parseGameSave(value), /存档|JSON/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "another-game" })), /不是 Plot Workers/);
   assert.throws(() => parseGameSave(JSON.stringify({ format: "plot-workers-save", formatVersion: 2 })), /版本/);
-  assert.throws(() => parse({ ...initial(), version: 11 }), /较新版本/);
+  assert.throws(() => parse({ ...initial(), version: 12 }), /较新版本/);
 });
 
 test("oversize files and robot allocation attacks are rejected before migration", () => {

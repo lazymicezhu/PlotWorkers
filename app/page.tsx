@@ -26,6 +26,7 @@ import {
   RESEARCH,
   SCHEDULER_EFFICIENCY_MAX,
   SCHEDULER_EFFICIENCY_STEP,
+  SPECIAL_ITEM_IDS,
   SPECIAL_ITEM_NAMES,
   SYNTHESIS_RECIPES,
   SYNTHESIS_SELL_PRICES,
@@ -55,6 +56,7 @@ import {
   guardedPlotIds,
   isForeman,
   nextPlotPrice,
+  plotCapacity,
   parseSavedState,
   placeHolyLight,
   recyclePlot,
@@ -67,6 +69,8 @@ import {
   toggleSchedulerDuty,
   upgradeSchedulerEfficiency,
   upgradeSchedulerInterval,
+  useOrderRefreshTicket as consumeOrderRefreshTicket,
+  useGoldenOrderTicket as consumeGoldenOrderTicket,
   useSpecialItem as consumeSpecialItem,
   workerPurchasePrice,
 } from "./game-engine";
@@ -81,13 +85,17 @@ import { resolveWorkerDrop, workerAtPoint } from "./worker-drag";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
 import { BatchProgressBackground } from "./batch-progress";
 import { SAVE_BACKUP_KEY, SettingsDialog } from "./settings-dialog";
+import { applyDebugAction, type DebugAction } from "./debug-actions";
 import { exportGameSave } from "./save-file";
 import { startGameAutosave } from "./game-autosave";
+import { createAfterPaintSave } from "./after-paint-save";
 import { PerformanceOverlay } from "./performance-monitor";
 import { isPerformanceMonitoringEnabled, measureGameTask, recordGameTask } from "./performance-metrics";
 import { createRobotScheduler } from "./robot-scheduler";
 import { ForemanAura } from "./foreman-aura";
 import { useTrackingCamera } from "./use-tracking-camera";
+import { useCameraViewPersistence } from "./use-camera-view-persistence";
+import { getWorkerTrackingZoom } from "./camera-view-state";
 import { CAMERA_CULL_MARGIN_WORLD } from "./camera-motion";
 import { layeredBackingPlots } from "./plot-rendering";
 import { facingForDestination, readRenderedWorkerPosition } from "./worker-motion";
@@ -101,10 +109,13 @@ import { createGameView, resourceActivityBetween, updateGameView } from "./resou
 import { WorkshopTablet, type TabletPage } from "./workshop-tablet";
 import { TabletIcon } from "./tablet-icon";
 import { WorkshopOrders } from "./workshop-orders";
+import { WorkshopInventory } from "./workshop-inventory";
 import { WorkshopResearch } from "./workshop-research";
+import { FishingPond, FishingHarvest } from "./fishing-pond";
+import { pointInFishingPlot } from "./fishing";
 import managementStyles from "./workshop-management.module.css";
 import { useButtonFeedback } from "./use-button-feedback";
-import { isInfiniteResourcePreview, previewStorageKey, replenishPreviewResources } from "./preview-resources";
+import { createFinitePreviewState, grantPreviewTestItems, isLocalResourcePreview, isInfiniteResourcePreview, previewStorageKey, replenishPreviewResources } from "./preview-resources";
 import { snapshotTabletNotifications, reconcileTabletNotifications, type TabletNotificationSnapshot } from "./tablet-notifications";
 
 const TILE_W = 104;
@@ -114,7 +125,6 @@ const WORLD_W = 2000;
 const WORLD_H = 1080;
 const PLOT_DRAG_Z = SCENE_DRAG_Z + 100_000;
 const SAVE_KEY = "green-realm-save-v1";
-const ZOOM_KEY = "green-realm-player-zoom";
 const PERFORMANCE_KEY = "green-realm-performance-display";
 const RESOURCE_CHANGES_KEY = "green-realm-resource-change-display";
 
@@ -129,12 +139,13 @@ function persistGame(state: GameState) {
 const WHEEL_ZOOM_SENSITIVITY = .0007;
 // Chrome encodes pinch scale as deltaY = -100 * log(scale); retain 70% of that response.
 const PINCH_ZOOM_SENSITIVITY = .007;
-const CAN_PURCHASE_AMOUNTS = [1, 10, 50, 200] as const;
+const CAN_PURCHASE_MAX = 200;
 const ZONE_META: Record<ZoneType, { name: string; subtitle: string }> = {
   gather: { name: "采集区", subtitle: "产出原料" },
   process: { name: "加工区", subtitle: "加工产品" },
   synthesis: { name: "合成区", subtitle: "合成商品" },
   living: { name: "生活区", subtitle: "恢复心情" },
+  fishing: { name: "摸鱼池", subtitle: "手动入座 · 最多3人垂钓" },
 };
 type Panel = "process" | "synthesis" | "shop" | "sell" | "plotBuilder" | "inventory" | "orders" | "research" | null;
 type PlotDraft = { plot: PlotState; valid: boolean; original: PlotState };
@@ -262,6 +273,7 @@ function unproject(plot: PlotState, x: number, y: number) {
 
 function findPlot(plots: PlotState[], x: number, y: number) {
   return plots.find((plot) => {
+    if (plot.type === "fishing") return pointInFishingPlot(plot, { x, y });
     const point = unproject(plot, x, y);
     return point.u >= 0 && point.u <= plot.cols && point.v >= 0 && point.v <= plot.rows;
   }) ?? null;
@@ -276,10 +288,6 @@ function format(value: number) {
 function formatClock(seconds: number) {
   const value = Math.max(0, Math.ceil(seconds));
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
-}
-
-function plotCapacity(plot: PlotState) {
-  return Math.floor(plot.cols * plot.rows / 4);
 }
 
 function diamond(plot: PlotState, padding = 0) {
@@ -311,6 +319,7 @@ function validPlotPosition(candidate: PlotState, plots: PlotState[], excludeId?:
 
 function statusAfterDrop(worker: WorkerState, plot: PlotState | null) {
   if (!plot || plot.enabled === false) return "idle" as const;
+  if (plot.type === "fishing") return "fishing" as const;
   if (plot.type === "living") return worker.mood >= 100 ? "ready" as const : "resting" as const;
   return worker.mood <= 0 ? "exhausted" as const : "idle" as const;
 }
@@ -355,6 +364,7 @@ export default function PlotWorkersGame() {
   const simulationLastTimeRef = useRef(0);
   const unsimulatedSecondsRef = useRef(0);
   const [gameView, setGameView] = useState(() => createGameView(createInitialState(initialPoint.x, initialPoint.y)));
+  const afterPaintSaveRef = useRef<ReturnType<typeof createAfterPaintSave> | null>(null);
   const [infiniteResources, setInfiniteResources] = useState(false);
   const game = gameView.game;
   const activeHolyLights = game.effects.holyLight.filter((effect) => effect.remaining > 0);
@@ -375,6 +385,7 @@ export default function PlotWorkersGame() {
   const [trackedId, setTrackedId] = useState<string | null>(null);
   const [tabletOpen, setTabletOpen] = useState(false);
   const [tabletPage, setTabletPage] = useState<TabletPage>("shop");
+  const [researchTarget, setResearchTarget] = useState<ResearchId | null>(null);
   const [tabletUnread, setTabletUnread] = useState<Partial<Record<TabletPage, boolean>>>({});
   const [tabletNotificationVersion, setTabletNotificationVersion] = useState(0);
   const tabletNotificationRef = useRef<TabletNotificationSnapshot | null>(null);
@@ -382,6 +393,7 @@ export default function PlotWorkersGame() {
   const [panel, setPanel] = useState<Panel>("shop");
   const [selectedProcessPlotId, setSelectedProcessPlotId] = useState<ZoneId>("process");
   const [selectedSynthesisPlotId, setSelectedSynthesisPlotId] = useState<ZoneId>("");
+  const [harvestPlotId, setHarvestPlotId] = useState<ZoneId | null>(null);
   const [placingHoly, setPlacingHoly] = useState(false);
   const [holyPreview, setHolyPreview] = useState<{ x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -400,8 +412,8 @@ export default function PlotWorkersGame() {
   const [plotDraft, setPlotDraft] = useState<PlotDraft | null>(null);
   const [overRecycle, setOverRecycle] = useState(false);
   const [autoTransfers, setAutoTransfers] = useState<AutoTransfer[]>([]);
-  const [canPurchaseIndex, setCanPurchaseIndex] = useState(1);
-  const { camera, setCamera, beginPan, panCamera, endPan } = useTrackingCamera({
+  const [canPurchaseAmount, setCanPurchaseAmount] = useState<number | "">(10);
+  const { camera, cameraRef, setCamera, beginPan, panCamera, endPan } = useTrackingCamera({
     worldRef,
     trackedId,
     paused: rebirthSceneHidden || Boolean(draggingId || panning || plotDraft || placingPlot || placingHoly),
@@ -410,6 +422,7 @@ export default function PlotWorkersGame() {
     initialPosition: { x: 0, y: 0 },
     viewportSize,
   });
+  const cameraViewRestored = useCameraViewPersistence({ worldRef, cameraRef, zoom, setZoom, setCamera });
 
   const finishForemanCycle = useCallback((id: string) => {
     if (!foremanCyclesRef.current.delete(id)) return;
@@ -566,12 +579,26 @@ export default function PlotWorkersGame() {
 
   useEffect(() => {
     const preview = isInfiniteResourcePreview();
-    const stored = parseSavedState(localStorage.getItem(previewStorageKey(SAVE_KEY)))
-      ?? (preview ? parseSavedState(localStorage.getItem(SAVE_KEY)) : null);
-    const saved = preview ? replenishPreviewResources(stored ?? gameRef.current) : stored;
+    const saveKey = previewStorageKey(SAVE_KEY);
+    let stored = parseSavedState(localStorage.getItem(saveKey));
+    if (!stored && isLocalResourcePreview() && !preview) {
+      // Seed the finite test slot once, keeping both the unlimited workshop and
+      // the original normal save untouched. Later reloads use this slot as-is.
+      const unlimited = parseSavedState(localStorage.getItem(`${SAVE_KEY}-infinite-preview`));
+      stored = unlimited ? createFinitePreviewState(unlimited) : parseSavedState(localStorage.getItem(SAVE_KEY));
+      if (stored) localStorage.setItem(saveKey, JSON.stringify(stored));
+    }
     // Enable the local preview only after hydration; production keeps normal rules.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setInfiniteResources(preview);
+    let saved = preview ? replenishPreviewResources(stored ?? gameRef.current) : stored;
+    if (saved && isLocalResourcePreview() && !preview) {
+      try {
+        saved = grantPreviewTestItems(saved, localStorage, saveKey);
+      } catch {
+        setNotice("测试道具暂未发放，请刷新重试");
+      }
+    }
     if (saved) {
       gameRef.current = saved;
       tabletNotificationRef.current = snapshotTabletNotifications(saved);
@@ -579,8 +606,6 @@ export default function PlotWorkersGame() {
       setGameView(createGameView(saved));
       setSelectedId(saved.workers[0]?.id ?? null);
     }
-    const savedZoom = Number(localStorage.getItem(ZOOM_KEY));
-    if (Number.isFinite(savedZoom) && savedZoom >= .28 && savedZoom <= 1.5) setZoom(savedZoom);
     setPerformanceEnabled(localStorage.getItem(PERFORMANCE_KEY) === "true");
     setResourceChangesEnabled(localStorage.getItem(RESOURCE_CHANGES_KEY) !== "false");
     const updateViewportSize = () => setViewportSize({ width: window.innerWidth, height: window.innerHeight });
@@ -588,10 +613,6 @@ export default function PlotWorkersGame() {
     window.addEventListener("resize", updateViewportSize);
     return () => window.removeEventListener("resize", updateViewportSize);
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(ZOOM_KEY, String(zoom));
-  }, [zoom]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -602,7 +623,7 @@ export default function PlotWorkersGame() {
       const isPinch = event.ctrlKey;
       if (rebirthPausedRef.current || event.defaultPrevented || deltaY === 0 || !(event.target instanceof Element)) return;
       // Native bubbling reaches this listener before React's panel handlers.
-      if (event.target.closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
+      if (event.target.closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-fishing-harvest], [data-workshop-tablet]")) return;
       // Keep pinching when scene objects move under the gesture's anchor.
       if (!isPinch && event.target.closest(".plot, .walker")) return;
       if (event.cancelable) event.preventDefault();
@@ -665,7 +686,7 @@ export default function PlotWorkersGame() {
       for (const [id, cycle] of foremanCyclesRef.current) {
         const worker = current.workers.find((item) => item.id === id);
         const plot = worker?.zoneId ? plotsById.get(worker.zoneId) : undefined;
-        if (!worker || !plot || worker.zoneId !== cycle.zoneId || plot.enabled === false ||
+        if (!worker || !plot || plot.type === "fishing" || worker.zoneId !== cycle.zoneId || plot.enabled === false ||
           worker.status === "dragging" || id === draggingIdRef.current ||
           id === hoveredWorkerRef.current || plotDraftRef.current?.plot.id === cycle.zoneId) {
           finishForemanCycle(id);
@@ -710,6 +731,7 @@ export default function PlotWorkersGame() {
         !foremanCyclesRef.current.has(worker.id) &&
         plotDraftRef.current?.plot.id !== worker.zoneId &&
         plotsById.get(worker.zoneId!)?.enabled !== false
+        && plotsById.get(worker.zoneId!)?.type !== "fishing"
       );
       if (!eligible.length) return;
       const batchSize = current.workers.length > 300 ? 12 : current.workers.length > 150 ? 10 : 8;
@@ -752,12 +774,22 @@ export default function PlotWorkersGame() {
   }, [finishForemanCycle, setGame]);
 
   useEffect(() => {
-    return startGameAutosave((reason) => {
+    const saver = createAfterPaintSave(
+      () => persistGame(gameRef.current),
+      () => setNotice("进度暂未保存，会自动重试；请保持页面开启"),
+    );
+    afterPaintSaveRef.current = saver;
+    const stop = startGameAutosave((reason) => {
       if (rebirthPausedRef.current) return;
       if (reason === "interval" && (draggingIdRef.current || plotDraftRef.current)) return;
       // Leaving saves committed positions; loading already recovers in-flight workers.
-      persistGame(gameRef.current);
+      saver.flush();
     });
+    return () => {
+      stop();
+      saver.cancel();
+      if (afterPaintSaveRef.current === saver) afterPaintSaveRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -807,7 +839,7 @@ export default function PlotWorkersGame() {
     robotSchedulerRef.current?.sync(game.schedulerBots, schedulerActive && document.visibilityState === "visible");
   }, [game.schedulerBots, schedulerActive, worldRevision]);
 
-  const disabledPlotIds = useMemo(() => new Set(game.plots.filter((plot) => plot.enabled === false).map((plot) => plot.id)), [game.plots]);
+  const disabledPlotIds = useMemo(() => new Set(game.plots.filter((plot) => plot.enabled === false && plot.type !== "fishing").map((plot) => plot.id)), [game.plots]);
   const evacuationPending = game.workers.some((worker) => worker.zoneId && disabledPlotIds.has(worker.zoneId)
     && (worker.status !== "dragging" || autoTransferByWorker.has(worker.id)));
   useEffect(() => {
@@ -852,7 +884,7 @@ export default function PlotWorkersGame() {
     });
   }
 
-  function transactTabletGame(action: (current: GameState) => GameState) {
+  function transactTabletGame(action: (current: GameState) => GameState, presentAccepted?: () => void) {
     // Read the latest committed simulation before purchasing or changing an order.
     // The transaction stays outside React updaters, which may be replayed.
     flushSync(() => {});
@@ -860,16 +892,52 @@ export default function PlotWorkersGame() {
     const next = action(current);
     if (next === current) return false;
     gameRef.current = next;
-    flushSync(() => setGame(next));
-    persistGame(next);
+    flushSync(() => {
+      // Publish the departing card and trade together: no intermediate pending
+      // card render, and the peel's layout effect prepares the very first paint.
+      presentAccepted?.();
+      setGame(next);
+    });
+    if (presentAccepted) {
+      if (afterPaintSaveRef.current) afterPaintSaveRef.current.request();
+      else {
+        // A committed delivery remains successful even if storage is unavailable.
+        try { persistGame(next); }
+        catch { setNotice("进度暂未保存，会自动重试；请保持页面开启"); }
+      }
+    } else persistGame(next);
     return true;
   }
 
-  function deliverTabletOrder(orderId: string) {
-    return transactTabletGame((current) => submitOrder(current, orderId));
+  function deliverTabletOrder(orderId: string, accepted: () => void, golden = false) {
+    let reward: SpecialItemId | undefined;
+    return transactTabletGame((current) => {
+      const next = golden ? consumeGoldenOrderTicket(current, orderId) : submitOrder(current, orderId);
+      if (next !== current) {
+        reward = SPECIAL_ITEM_IDS.find((id) => next.inventory.specials[id] > current.inventory.specials[id] - (golden && id === "goldenOrder" ? 1 : 0));
+      }
+      return next;
+    }, () => {
+      accepted();
+      setNotice(`${golden ? "已使用黄金订单券，免材料完成订单" : "订单已交付"}${reward ? `，获得${SPECIAL_ITEM_NAMES[reward]} ×1` : ""}`);
+    });
+  }
+
+  function refreshTabletOrderWithTicket() {
+    const success = transactTabletGame((current) => consumeOrderRefreshTicket(current), () => {
+      selectTabletPage("orders");
+      setNotice("已使用订单刷新券，新增一张订单");
+    });
+    if (!success) setNotice("暂时无法使用刷新券，请检查券数量、合成区和订单空位");
   }
 
   function upgradeTabletResearch(id: ResearchId) {
+    if (id === "fishing") {
+      if (gameRef.current.plots.some((plot) => plot.type === "fishing")) return;
+      if (gameRef.current.research.fishing < 1 && !transactTabletGame((current) => buyResearch(current, id))) return;
+      beginFishingPlotPlacement();
+      return;
+    }
     const success = transactTabletGame((current) => buyResearch(current, id));
     setNotice(success ? `${RESEARCH[id].name}${RESEARCH[id].costs.length === 1 ? "已解锁" : "已升级"}` : "金币不足或研究已完成");
   }
@@ -921,7 +989,8 @@ export default function PlotWorkersGame() {
     if (rebirthPausedRef.current) return;
     if (placingHoly) { onPanDown(event); return; }
     if (placingPlotRef.current || plotDraftRef.current || draggingIdRef.current || event.button !== 0 || event.isPrimary === false) return;
-    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet], input, select")) return;
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-fishing-harvest], [data-workshop-tablet], input, select")) return;
+    if ((event.target as Element).closest("[data-fishing-worker]")) return;
     const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
     const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
     if (id) onWorkerDown(event, id);
@@ -930,7 +999,8 @@ export default function PlotWorkersGame() {
   function onScenePointerMoveCapture(event: PointerEvent<HTMLElement>) {
     if (placingHoly) { onPanMove(event); return; }
     if (rebirthPausedRef.current || draggingIdRef.current || panPointerRef.current !== null || placingPlotRef.current || plotDraftRef.current || event.buttons !== 0 || event.pointerType === "touch") return;
-    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet], input, select")) { clearWorkerHover(); return; }
+    if ((event.target as Element).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-fishing-harvest], [data-workshop-tablet], input, select")) { clearWorkerHover(); return; }
+    if ((event.target as Element).closest("[data-fishing-worker]")) { clearWorkerHover(); return; }
     const domWorker = (event.target as Element).closest<HTMLElement>(".walker");
     const id = hitTestCanvasWorker(worldRef.current, positionInWorld(event.clientX, event.clientY), domWorker ? Number(domWorker.style.zIndex) : -Infinity);
     if (!id) { if (!domWorker) clearWorkerHover(); return; }
@@ -1061,6 +1131,7 @@ export default function PlotWorkersGame() {
   function onPlotDown(event: PointerEvent<HTMLDivElement>, plot: PlotState) {
     event.stopPropagation();
     if (draggingId || placingPlot) return;
+    setHarvestPlotId(null);
     for (const [id, cycle] of foremanCyclesRef.current) {
       if (cycle.zoneId === plot.id) finishForemanCycle(id);
     }
@@ -1170,6 +1241,21 @@ export default function PlotWorkersGame() {
     setNotice("移动鼠标选择位置，单击空白处完成购买");
   }
 
+  function beginFishingPlotPlacement() {
+    const current = gameRef.current;
+    if (current.research.fishing < 1 || current.plots.some((plot) => plot.type === "fishing")) return;
+    const bounds = viewportRef.current?.getBoundingClientRect();
+    const center = bounds ? positionInWorld(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) : { x: WORLD_W / 2, y: WORLD_H / 2 };
+    const plot: PlotState = { id: `fishing-${Date.now()}`, type: "fishing", name: "摸鱼池", x: center.x - 2 * TILE_W, y: center.y - 2 * TILE_H, cols: 4, rows: 4, purchasePrice: 0, enabled: true };
+    const placement = { plot, valid: validPlotPosition(plot, current.plots) };
+    placingPlotRef.current = placement;
+    setPlacingPlot(placement);
+    setHarvestPlotId(null);
+    setTabletOpen(false);
+    setPanel(null);
+    setNotice("摸鱼池已免费解锁，选择空位放置 · Esc取消后可从研究继续放置");
+  }
+
   function updatePlotPlacement(clientX: number, clientY: number) {
     const placement = placingPlotRef.current;
     if (!placement) return;
@@ -1192,11 +1278,12 @@ export default function PlotWorkersGame() {
       setPlacingPlot(invalid);
       return setNotice("这里与其他地块的顶面重叠，请换一个位置");
     }
-    updateGame((current) => buyPlot(current, plot));
+    const placed = transactTabletGame((current) => buyPlot(current, plot));
+    if (!placed) return setNotice(plot.type === "fishing" ? "摸鱼池已放置，或尚未解锁" : "金币不足，暂时无法购买地块");
     placingPlotRef.current = null;
     setPlacingPlot(null);
     setPanel(null);
-    setNotice("新地块购买并摆放完成");
+    setNotice(plot.type === "fishing" ? "摸鱼池已放置，手动拖入小人即可垂钓" : "新地块购买并摆放完成");
   }
 
   function cancelPurchasedPlot() {
@@ -1365,7 +1452,7 @@ export default function PlotWorkersGame() {
 
   function onPanDown(event: PointerEvent<HTMLElement>) {
     if (placingHoly) {
-      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
+      if ((event.target as HTMLElement).closest(".hud, .floating-panel, .worker-manager, .utility-dock, .confirm-panel, .settings-dialog, [data-fishing-harvest], [data-workshop-tablet]")) return;
       event.preventDefault();
       event.stopPropagation();
       const point = positionInWorld(event.clientX, event.clientY);
@@ -1380,7 +1467,7 @@ export default function PlotWorkersGame() {
       placePurchasedPlot(event.clientX, event.clientY);
       return;
     }
-    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog, [data-workshop-tablet]")) return;
+    if (event.button !== 0 || (event.target as HTMLElement).closest(".plot, .walker, .hud, .floating-panel, .worker-manager, .confirm-panel, .settings-dialog, [data-fishing-harvest], [data-workshop-tablet]")) return;
     if (panPointerRef.current !== null) return;
     panPointerRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -1411,8 +1498,10 @@ export default function PlotWorkersGame() {
     setTrackedId(worker.id);
   }
 
-  function selectTabletPage(page: TabletPage) {
+  function selectTabletPage(page: TabletPage, researchId: ResearchId | null = null) {
+    setHarvestPlotId(null);
     setTabletPage(page);
+    setResearchTarget(page === "research" ? researchId : null);
     setPanel(page === "workers" || page === "robots" || page === "plots" ? null : page);
     setTabletUnread((current) => current[page] ? { ...current, [page]: false } : current);
   }
@@ -1452,6 +1541,15 @@ export default function PlotWorkersGame() {
 
   function activateSpecial(id: SpecialItemId) {
     if (game.inventory.specials[id] <= 0) return;
+    if (id === "orderRefresh") {
+      refreshTabletOrderWithTicket();
+      return;
+    }
+    if (id === "goldenOrder") {
+      selectTabletPage("orders");
+      setNotice("请选择一张订单，使用黄金订单券免材料完成");
+      return;
+    }
     if (id === "holyLight") {
       setTabletOpen(false);
       setPanel(null);
@@ -1465,6 +1563,7 @@ export default function PlotWorkersGame() {
   }
 
   function installGame(next: GameState) {
+    setHarvestPlotId(null);
     next = preparePreviewGame(next);
     rebirthPausedRef.current = false;
     rebirthSourceRef.current = null;
@@ -1541,8 +1640,20 @@ export default function PlotWorkersGame() {
     setSettingsOpen(false);
   }
 
+  function debugGame(action: DebugAction) {
+    flushSync(() => {});
+    const next = preparePreviewGame(applyDebugAction(gameRef.current, action));
+    try { persistGame(next); }
+    catch { throw new Error("浏览器无法保存修改，当前进度未改变，请重试。"); }
+    // Simulation reconciliation recomputes against this latest state; keep
+    // the world epoch so ongoing robot transfers can still finish normally.
+    gameRef.current = next;
+    flushSync(() => setGame(next));
+  }
+
   function beginRebirth() {
     if (rebirthPausedRef.current || !canFirstRebirth(gameRef.current)) return;
+    setHarvestPlotId(null);
     rebirthSourceRef.current = gameRef.current;
     setRebirthError("");
     // Keep the old scene visible for its farewell, but stop it from producing,
@@ -1621,7 +1732,9 @@ export default function PlotWorkersGame() {
     return point.x >= visibleBounds.left && point.x <= visibleBounds.right && point.y >= visibleBounds.top && point.y <= visibleBounds.bottom;
   });
 
-  const shouldDrawOnCanvas = (worker: WorkerState) => !rebirthSceneHidden && !isForeman(worker)
+  const isSeatedFishingWorker = (worker: WorkerState) => worker.id !== draggingId && worker.status !== "dragging"
+    && Boolean(worker.zoneId && displayPlotById.get(worker.zoneId)?.type === "fishing");
+  const shouldDrawOnCanvas = (worker: WorkerState) => !rebirthSceneHidden && !isForeman(worker) && !isSeatedFishingWorker(worker)
     && worker.id !== draggingId
     && !autoTransferByWorker.has(worker.id) && plotDraft?.plot.id !== worker.zoneId;
   const canvasWorkers = visibleWorkers.filter(shouldDrawOnCanvas).map((worker) => {
@@ -1629,7 +1742,7 @@ export default function PlotWorkersGame() {
     return { worker, projected: plot ? project(plot, worker.u, worker.v) : { x: worker.x, y: worker.y }, tracked: worker.id === trackedId || worker.id === selectedId, hovered: worker.id === hoveredWorker };
   });
 
-  const occlusionDepths = visibleWorkers.filter((worker) => isForeman(worker) && worker.id !== draggingId
+  const occlusionDepths = visibleWorkers.filter((worker) => isForeman(worker) && !isSeatedFishingWorker(worker) && worker.id !== draggingId
     && !autoTransferByWorker.has(worker.id) && plotDraft?.plot.id !== worker.zoneId).map((worker) => {
     const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
     return sceneDepth(plot ? project(plot, worker.u, worker.v).y : worker.y);
@@ -1644,7 +1757,7 @@ export default function PlotWorkersGame() {
         {panel === "shop" && <>
           <h2>生活商店</h2>
           <div className="tablet-shop-products">
-          {!game.autoCanSupply && <CanPurchaseRow selectedIndex={canPurchaseIndex} coins={game.coins} onChange={setCanPurchaseIndex} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} />}
+          {!game.autoCanSupply && <CanPurchaseRow requestedAmount={canPurchaseAmount} coins={game.coins} onChange={setCanPurchaseAmount} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} />}
           {!game.autoCanSupply && <AutoCanSupplyRow coins={game.coins} onBuy={() => spend(() => buyAutoCanSupply(game), "自动补给罐头已启用", "金币不足")} />}
           <ShopRow title="随机小人" icon="worker" description="随机属性 · 随机性格" meta={`当前 ${game.workers.length} 人`} price={workerPurchasePrice(game.workers.length)} disabled={game.coins < workerPurchasePrice(game.workers.length)} onClick={buyNewWorker} />
           {!game.autoSchedulerSupply && <ShopRow title="自动调度服务" icon="robot" description="每次增加 60 秒" meta={`${game.schedulerBots} 台机器人 · 剩余 ${infiniteResources ? "∞" : formatClock(game.schedulerSeconds)}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} />}
@@ -1665,10 +1778,10 @@ export default function PlotWorkersGame() {
           ] as const).map(([kind, name, price]) => <ProductSaleRow infiniteResources={infiniteResources} key={kind} name={name} stock={game.inventory[kind]} price={price} onSell={(amount) => updateGame((current) => sellProducts(current, kind, amount))} />)}
           <button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined && !game.inventory.screws && !game.inventory.rebar} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button>
         </>}
-        {panel === "inventory" && <><h2>特殊物品背包</h2>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><i className="tablet-item-icon"><TabletIcon name={id === "canOpener" ? "can" : id === "smartLeader" ? "robot" : "bolt"} size={21} /></i><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{infiniteResources ? "∞" : game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 可同时放置多个，每处独立60秒，重叠不叠加"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {activeHolyLights.length}处{activeHolyLights.length > 0 && `（${activeHolyLights.map((effect) => `${Math.ceil(effect.remaining)}s`).join(" / ")}）`}</div></>}
+        {panel === "inventory" && <WorkshopInventory game={game} infiniteResources={infiniteResources} onUse={activateSpecial} />}
         {panel === "orders" && !game.plots.some((plot) => plot.type === "synthesis") && <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="orders" size={44} /></span><h2>第一张订单，等你开工</h2><p>建造一块合成区，就能开始接收工厂订单。</p><button className="primary-action" onClick={() => { setTabletPage("shop"); setBuilderType("synthesis"); setPanel("plotBuilder"); }}>建造合成区</button></div>}
-        {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onTrack={trackTabletOrder} onCancelTracking={cancelTabletOrderTracking} onRefresh={refreshTabletOrder} onResearch={() => selectTabletPage("research")} onDeliver={deliverTabletOrder} onNotice={setNotice} />}
-        {panel === "research" && <WorkshopResearch game={game} onUpgrade={upgradeTabletResearch} />}
+        {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onTrack={trackTabletOrder} onCancelTracking={cancelTabletOrderTracking} onRefresh={refreshTabletOrder} onDeliver={deliverTabletOrder} onGoldenDeliver={(orderId, accepted) => deliverTabletOrder(orderId, accepted, true)} onRefreshTicket={refreshTabletOrderWithTicket} infiniteResources={infiniteResources} onNotice={setNotice} />}
+        {panel === "research" && <WorkshopResearch game={game} targetId={researchTarget} onUpgrade={upgradeTabletResearch} />}
   </>;
 
   return (
@@ -1692,10 +1805,11 @@ export default function PlotWorkersGame() {
       <ResourceHud key={`hud-${worldRevision}-${resourceChangesEnabled}`} game={game} activity={gameView.activity} showChanges={resourceChangesEnabled} infiniteResources={infiniteResources} onSettings={() => setSettingsOpen(true)} />
       {settingsOpen && <SettingsDialog
         game={game}
-        backupKey={infiniteResources ? previewStorageKey(SAVE_BACKUP_KEY) : SAVE_BACKUP_KEY}
+        backupKey={previewStorageKey(SAVE_BACKUP_KEY)}
         onClose={() => setSettingsOpen(false)}
         onImport={importSave}
         onReset={resetGame}
+        onDebug={debugGame}
         performanceEnabled={performanceEnabled}
         onPerformanceChange={(enabled) => { setPerformanceEnabled(enabled); localStorage.setItem(PERFORMANCE_KEY, String(enabled)); }}
         resourceChangesEnabled={resourceChangesEnabled}
@@ -1710,7 +1824,7 @@ export default function PlotWorkersGame() {
       {rebirthStage === "reward" && <RebirthReveal onContinue={continueRebirth} error={rebirthError} />}
       <PerformanceOverlay enabled={performanceEnabled} workers={game.workers.length} robots={game.schedulerBots} />
 
-      <div key={`world-${worldRevision}`} className={`world ${rebirthSceneHidden ? rebirthTransitionStyles.worldDissolving : ""} ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom } as CSSProperties}>
+      <div key={`world-${worldRevision}`} className={`world ${rebirthSceneHidden ? rebirthTransitionStyles.worldDissolving : ""} ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom, visibility: cameraViewRestored ? undefined : "hidden" } as CSSProperties}>
         {activeHolyLights.map((effect) => <div key={effect.id} className="ground-event holy-zone" style={{ left: effect.x - 8 * 52, top: effect.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(effect.remaining)}s</span></div>)}
         {placingHoly && holyPreview && <div className="ground-event holy-zone holy-preview" style={{ left: holyPreview.x - 8 * 52, top: holyPreview.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光覆盖范围 · 半径8格</span></div>}
         {visiblePlots.map((plot) => {
@@ -1719,15 +1833,15 @@ export default function PlotWorkersGame() {
           const valid = isPlacement ? placingPlot.valid : isMoving ? plotDraft.valid : true;
           const count = workerCountByPlot.get(plot.id) ?? 0;
           const operational = plot.enabled !== false;
-          const guarded = operational && guardedPlots.has(plot.id);
-          const holyBonus = operational && plot.type !== "living" && game.effects.holyLight.some((effect) => effect.remaining > 0 && circleHitsPlot(effect.x, effect.y, 8, plot));
+          const guarded = operational && plot.type !== "fishing" && guardedPlots.has(plot.id);
+          const holyBonus = operational && plot.type !== "living" && plot.type !== "fishing" && game.effects.holyLight.some((effect) => effect.remaining > 0 && circleHitsPlot(effect.x, effect.y, 8, plot));
           return <section
             className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${guarded ? "is-guarded" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
             data-plot-id={plot.id}
             key={plot.id}
             style={{ "--rebirth-delay": `${rebirthDelayByPlot.get(plot.id) ?? 0}ms`, left: plot.x, top: plot.y, width: plot.cols * TILE_W, height: plot.rows * TILE_H + CUBE_DEPTH, zIndex: isMoving || isPlacement ? PLOT_DRAG_Z : undefined, "--cols": plot.cols, "--rows": plot.rows, "--plot-width": `${plot.cols * TILE_W}px`, "--plot-height": `${plot.rows * TILE_H}px` } as CSSProperties}
           >
-            {!rebirthSceneHidden && !layeredPlotIds.has(plot.id) && !isMoving && !isPlacement && hoveredPlot !== plot.id && operational ? <img
+            {plot.type === "fishing" ? <FishingPond plot={plot} workers={game.workers} paused={rebirthSceneHidden} draggingWorkerId={draggingId} onWorkerPointerDown={onWorkerDown} /> : !rebirthSceneHidden && !layeredPlotIds.has(plot.id) && !isMoving && !isPlacement && hoveredPlot !== plot.id && operational ? <img
               className="plot-baked" src={`/plot-baked-${plot.type}-${plot.cols}.png`} alt="" draggable={false}
               style={{ width: plot.cols * TILE_W, height: Math.ceil((plot.rows * TILE_H + CUBE_DEPTH) * 1.08) }}
             /> : <>
@@ -1740,13 +1854,14 @@ export default function PlotWorkersGame() {
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
             <div className="zone-sign"><strong>{plot.name}</strong><span>{plot.cols}×{plot.rows} · {count}/{plotCapacity(plot)}人{plot.enabled === false ? " · 已停用" : ""}</span></div>
-            {!isPlacement && plot.type === "process" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setTabletOpen(false); setPanel("process"); }}>配方</button></div>}
-            {!isPlacement && plot.type === "synthesis" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setTabletOpen(false); setPanel("synthesis"); }}>合成</button></div>}
+            {!isPlacement && plot.type === "process" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setHarvestPlotId(null); setSelectedProcessPlotId(plot.id); setTabletOpen(false); setPanel("process"); }}>配方</button></div>}
+            {!isPlacement && plot.type === "synthesis" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setHarvestPlotId(null); setSelectedSynthesisPlotId(plot.id); setTabletOpen(false); setPanel("synthesis"); }}>合成</button></div>}
+            {!isPlacement && plot.type === "fishing" && <div className="plot-action-anchor"><button className="scene-action fishing-action" onPointerDown={(event) => event.stopPropagation()} onClick={() => { setHarvestPlotId(plot.id); setTabletOpen(false); setPanel(null); }}>收获</button></div>}
           </section>;
         })}
 
         {!rebirthSceneHidden && <CanvasWorkers workers={canvasWorkers} worldRef={worldRef} zoom={zoom} population={game.workers.length} occlusionDepths={occlusionDepths} />}
-        {visibleWorkers.filter((worker) => !shouldDrawOnCanvas(worker)).map((worker) => {
+        {visibleWorkers.filter((worker) => !shouldDrawOnCanvas(worker) && !isSeatedFishingWorker(worker)).map((worker) => {
           const plot = worker.zoneId ? displayPlotById.get(worker.zoneId) : undefined;
           const autoTransfer = autoTransferByWorker.get(worker.id);
           const automated = Boolean(autoTransfer);
@@ -1768,7 +1883,7 @@ export default function PlotWorkersGame() {
 
       <WorkshopTablet infiniteResources={infiniteResources} open={tabletOpen} activePage={tabletPage} onOpenChange={changeTabletOpen} onPageChange={selectTabletPage} unreadPages={tabletUnread} notificationVersion={tabletNotificationVersion} coins={game.coins} workerCount={game.workers.length}>
         {tabletPage === "workers" || tabletPage === "plots" || (tabletPage === "robots" && game.schedulerServiceUnlocked) ?
-          <WorkerManager infiniteResources={infiniteResources} key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} upgradesUnlocked={game.research.management > 0} onResearch={() => selectTabletPage("research")} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
+          <WorkerManager infiniteResources={infiniteResources} key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} upgradesUnlocked={game.research.management > 0} onResearch={() => selectTabletPage("research", "management")} onSelect={(worker) => { setZoom(getWorkerTrackingZoom); trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
           <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="robot" size={44} /></span><h2>让机器人搭把手</h2><p>开启自动调度服务，让机器人帮忙安排工作、休息和唤醒摸鱼的小人。</p><button className="primary-action" onClick={() => selectTabletPage("shop")}>去商店看看</button></div> :
           <div className="tablet-business-content" data-page={panel}>
             {panel === "plotBuilder" && <button className="tablet-back" onClick={() => setPanel("shop")}>← 返回商店</button>}
@@ -1781,10 +1896,12 @@ export default function PlotWorkersGame() {
         {panelContents}
       </aside>}
 
+      {harvestPlotId && game.fishingPlots[harvestPlotId] && <FishingHarvest history={game.fishingPlots[harvestPlotId].history} onClose={() => setHarvestPlotId(null)} />}
+
       {placingPlot && <div className={`placement-tip ${placingPlot.valid ? "is-valid" : "is-invalid"}`}>{placingPlot.valid ? "单击放置地块 · Esc取消" : "地块发生碰撞 · Esc取消"}</div>}
       {placingHoly && <div className="placement-tip is-valid">单击空白区域放置圣光 · Esc取消</div>}
       {plotDraft && <div ref={recycleBinRef} className={`recycle-bin ${overRecycle ? "is-over" : ""}`}><span>♻️</span><strong>拖到这里回收</strong><small>返还购买价70%</small></div>}
-      {notice && <div className={`notice ${plotDraft ? "is-above-recycle" : ""}`}>{notice}</div>}
+      {notice && <div className={`notice ${notice.includes("黄金订单券") ? "is-golden" : ""} ${plotDraft ? "is-above-recycle" : ""}`}>{notice}</div>}
     </main>
   );
 }
@@ -1794,11 +1911,12 @@ const WORKER_LIST_HEIGHT = 448;
 
 function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { workers: WorkerState[]; selectedId?: string; trackedId: string | null; onSelect: (worker: WorkerState) => void }) {
   const [scrollTop, setScrollTop] = useState(0);
+  const displayWorkers = useMemo(() => [...workers.filter(isForeman), ...workers.filter((worker) => !isForeman(worker))], [workers]);
   const start = Math.max(0, Math.floor(scrollTop / WORKER_ROW_HEIGHT) - 3);
   const end = Math.min(workers.length, start + Math.ceil(WORKER_LIST_HEIGHT / WORKER_ROW_HEIGHT) + 6);
   return <div className="worker-list" style={{ height: Math.min(WORKER_LIST_HEIGHT, workers.length * WORKER_ROW_HEIGHT + 12) }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
     <div className="worker-list-inner" style={{ height: workers.length * WORKER_ROW_HEIGHT }}>
-      {workers.slice(start, end).map((worker, offset) => {
+      {displayWorkers.slice(start, end).map((worker, offset) => {
         const foreman = isForeman(worker);
         return <button type="button" key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} data-feedback-size="wide" data-foreman={foreman || undefined} title={`点击追踪${worker.name}`} onClick={() => onSelect(worker)}>
           <i aria-hidden="true" />
@@ -1842,7 +1960,7 @@ function WorkerManager({ infiniteResources = false, workers, plots, processPlots
   const robotsOpen = activeSection === "robots";
   const plotsOpen = activeSection === "plots";
   const [plotGroup, setPlotGroup] = useState<ZoneType | "all">("all");
-  const plotGroups = (["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => ({ type, plots: plots.filter((plot) => plot.type === type) }));
+  const plotGroups = (["gather", "process", "synthesis", "living", "fishing"] as ZoneType[]).map((type) => ({ type, plots: plots.filter((plot) => plot.type === type) }));
   return <aside className="worker-manager tablet-manager" onPointerDown={(event) => event.stopPropagation()}>
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
     <div className="manager-head"><div><h2>人物管理</h2><p>{workers.length} 人 · 点击卡片追踪人物</p></div><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
@@ -1900,10 +2018,36 @@ function ShopRow({ title, icon, description, meta, price, disabled, onClick, pri
   return <div className="tablet-product"><i className="tablet-item-icon"><TabletIcon name={icon} size={20} /></i><div className="tablet-product-info"><h3>{title}</h3><p>{description}</p><small>{meta}</small></div><ShopPurchase title={title} price={price} disabled={disabled} onClick={onClick} suffix={priceSuffix} /></div>;
 }
 
-function CanPurchaseRow({ selectedIndex, coins, onChange, onBuy }: { selectedIndex: number; coins: number; onChange: (index: number) => void; onBuy: (amount: number) => void }) {
-  const amount = CAN_PURCHASE_AMOUNTS[selectedIndex];
+function CanPurchaseRow({ requestedAmount, coins, onChange, onBuy }: { requestedAmount: number | ""; coins: number; onChange: (amount: number | "") => void; onBuy: (amount: number) => void }) {
+  const pointerSliding = useRef(false);
+  const normalize = (value: number) => Number.isFinite(value) ? Math.max(1, Math.min(CAN_PURCHASE_MAX, Math.floor(value))) : 1;
+  const amount = normalize(Number(requestedAmount));
   const price = amount * 2;
-  return <div className="tablet-product tablet-product-cans"><i className="tablet-item-icon"><TabletIcon name="can" size={20} /></i><div className="tablet-product-info"><h3>罐头 <span>×{amount}</span></h3><p>供生活区自动恢复心情</p><div className="tablet-can-picker"><input aria-label="罐头购买数量" type="range" min="0" max="3" step="1" value={selectedIndex} onChange={(event) => onChange(Number(event.target.value))} /><div>{CAN_PURCHASE_AMOUNTS.map((value, index) => <button type="button" key={value} aria-pressed={index === selectedIndex} onClick={() => onChange(index)}>{value}</button>)}</div></div></div><ShopPurchase title={`${amount} 个罐头`} price={price} disabled={coins < price} onClick={() => onBuy(amount)} /></div>;
+  const snapAmount = (value: number) => {
+    const quantity = normalize(value);
+    const nearest = [50, 100, 150].sort((a, b) => Math.abs(a - quantity) - Math.abs(b - quantity))[0];
+    return Math.abs(nearest - quantity) <= CAN_PURCHASE_MAX * .02 ? nearest : quantity;
+  };
+  return <div className="tablet-product tablet-product-cans">
+    <i className="tablet-item-icon"><TabletIcon name="can" size={20} /></i>
+    <div className="tablet-product-info"><h3>罐头 <span>×{amount}</span></h3><p>供生活区自动恢复心情</p></div>
+    <div className="product-sale-controls tablet-can-controls">
+      <div className="product-sale-slider">
+        <div className="product-sale-snap-marks" aria-hidden="true">{[50, 100, 150].map((value) => <i key={value} style={{ left: `${(value - 1) / (CAN_PURCHASE_MAX - 1) * 100}%` }} />)}</div>
+        <input className="product-sale-range" aria-label="罐头购买数量滑条" type="range" min={1} max={CAN_PURCHASE_MAX} step={1} value={amount}
+          onPointerDown={() => { pointerSliding.current = true; }}
+          onChange={(event) => onChange(pointerSliding.current ? snapAmount(Number(event.target.value)) : normalize(Number(event.target.value)))}
+          onPointerUp={(event) => { pointerSliding.current = false; onChange(snapAmount(Number(event.currentTarget.value))); }}
+          onPointerCancel={() => { pointerSliding.current = false; }}
+          onLostPointerCapture={() => { pointerSliding.current = false; }}
+          onBlur={() => { pointerSliding.current = false; }}
+          onKeyDown={() => { pointerSliding.current = false; }} />
+      </div>
+      <input className="product-sale-amount" type="number" aria-label="罐头购买数量" inputMode="numeric" min={1} max={CAN_PURCHASE_MAX} step={1} value={requestedAmount === "" ? "" : amount}
+        onChange={(event) => onChange(event.target.value === "" ? "" : normalize(Number(event.target.value)))} onBlur={() => onChange(amount)} />
+    </div>
+    <ShopPurchase title={`${amount} 个罐头`} price={price} disabled={requestedAmount === "" || coins < price} onClick={() => onBuy(amount)} />
+  </div>;
 }
 
 function AutoCanSupplyRow({ coins, onBuy }: { coins: number; onBuy: () => void }) {

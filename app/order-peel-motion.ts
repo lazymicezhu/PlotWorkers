@@ -74,14 +74,16 @@ export async function animateOrderPeel(slot: HTMLElement, paper: HTMLElement, la
       finishPeel = resolve;
       function draw(now: number) {
         if (aborted || !slot.isConnected || reduced.matches) { resolve(); return; }
-        const t = Math.min(1, (now - started) / 1200);
-        const progress = t < .18 ? .045 * (t / .18) ** 2 : .045 + .955 * ((t - .18) / .82) ** 1.2;
+        const t = Math.max(0, Math.min(1, (now - started) / 1200));
+        // Begin with a small, visible lifted corner and move immediately. The
+        // first frame must not spend a fifth of the peel barely leaving rest.
+        const progress = .02 + .98 * t;
         const crease = width - (width + height) * progress;
         paper.style.clipPath = clippedPaper(width, height, crease);
         const y0 = Math.max(0, -crease), y1 = Math.min(height, width - crease);
         const ax = crease + y0, ay = y0, bx = crease + y1, by = y1;
         const span = Math.max(0, (y1 - y0) * Math.SQRT2);
-        const curl = Math.min(42, span * .28) * Math.sin(Math.PI * Math.min(1, t * 1.06)) ** .45;
+        const curl = Math.min(42, span * .28) * Math.sin(Math.PI * (.08 + .92 * Math.min(1, t * 1.06))) ** .45;
         const dx = -curl / Math.SQRT2, dy = curl / Math.SQRT2;
         fold.setAttribute("d", `M ${ax} ${ay} L ${bx} ${by} Q ${bx + dx * 1.7} ${by + dy * .3} ${bx + dx} ${by + dy} L ${ax + dx} ${ay + dy} Q ${ax + dx * .3} ${ay + dy * 1.7} ${ax} ${ay} Z`);
         edge.setAttribute("d", `M ${ax + dx} ${ay + dy} L ${bx + dx} ${by + dy}`);
@@ -90,12 +92,13 @@ export async function animateOrderPeel(slot: HTMLElement, paper: HTMLElement, la
         gradient.setAttribute("x2", String(mx + dx)); gradient.setAttribute("y2", String(my + dy));
         const lift = Math.sin(Math.PI * t);
         overlay.style.filter = `drop-shadow(${3 + lift * 4}px ${-3 - lift * 4}px ${3 + lift * 6}px rgba(57,67,40,${.1 + lift * .14}))`;
-        overlay.style.opacity = String(Math.min(1, t * 14, (1 - t) * 12));
+        overlay.style.opacity = String(Math.min(1, .8 + t * 14, (1 - t) * 12));
         slot.style.setProperty("--peel-progress", String(progress));
         if (t < 1) frame = requestAnimationFrame(draw);
         else resolve();
       }
-      frame = requestAnimationFrame(draw);
+      // Paint the initial geometry synchronously; later frames only advance it.
+      draw(started);
     });
     cancelAnimationFrame(frame);
     if (aborted || !slot.isConnected) return false;

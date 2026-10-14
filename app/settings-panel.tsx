@@ -42,7 +42,7 @@ export function SettingsPanel({ title, titleId = "settings-title", page, onClose
 
   return <dialog
     ref={dialogRef}
-    className={`settings-dialog ${styles.dialog}`}
+    className={`settings-dialog ${styles.dialog} ${actions ? "" : styles.withoutActions}`}
     data-settings-page={page}
     aria-labelledby={titleId}
     aria-describedby={descriptionId}
@@ -56,13 +56,13 @@ export function SettingsPanel({ title, titleId = "settings-title", page, onClose
     onWheel={(event) => event.stopPropagation()}
     onKeyDown={(event) => event.stopPropagation()}
   >
-    <header className={styles.head}>
+    <header className={`${styles.head} ${onBack ? "" : styles.noBack}`}>
       {onBack && <button ref={backRef} className={`${styles.icon} ${styles.back}`} aria-label="返回" onClick={onBack}>←</button>}
       <h2 id={titleId}>{title}</h2>
       {onClose && <button ref={closeRef} className={`${styles.icon} ${styles.close}`} aria-label="关闭设置" onClick={onClose}>×</button>}
     </header>
     <div ref={bodyRef} className={styles.body}>{children}</div>
-    <div ref={actionsRef} className={styles.actions}>{actions}</div>
+    {actions && <div ref={actionsRef} className={styles.actions}>{actions}</div>}
     <footer className={styles.feedback}>{feedback}</footer>
   </dialog>;
 }

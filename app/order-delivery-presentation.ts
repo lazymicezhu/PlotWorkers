@@ -2,13 +2,13 @@
 export function createOrderDeliveryGate() {
   const claimed = new Set<string>();
   return {
-    attempt(id: string, prepare: () => void, commit: () => boolean): "success" | "failed" | "duplicate" {
+    attempt(id: string, prepare: () => void, commit: (accepted: () => void) => boolean): "success" | "failed" | "duplicate" {
       if (claimed.has(id)) return "duplicate";
       claimed.add(id);
       try {
-        // Retain the card before a synchronous parent update removes the real order.
-        prepare();
-        if (commit()) return "success";
+        // The transaction calls accepted only after validation, in the same
+        // render batch that removes the real order. No pending-only render.
+        if (commit(prepare)) return "success";
         claimed.delete(id);
         return "failed";
       } catch (error) {

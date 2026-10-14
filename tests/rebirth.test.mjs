@@ -44,7 +44,7 @@ test("first rebirth resets all progress and grants exactly one playable foreman 
   const reborn = completeFirstRebirth(game);
   assert.ok(reborn);
   assert.deepEqual(game, before);
-  assert.equal(reborn.version, 10);
+  assert.equal(reborn.version, 11);
   assert.equal(reborn.rebirthCount, 1);
   assert.equal(reborn.workers.length, 2);
   const [ordinary, foreman] = reborn.workers;
@@ -89,7 +89,7 @@ test("all legacy save versions migrate to zero rebirths while keeping existing p
     delete legacy.rebirthCount;
     if (version < 3) legacy.batch = { active: false, progress: 0, reservedRaw: 0 };
     for (const loaded of [parseSavedState(JSON.stringify(legacy)), parseGameSave(JSON.stringify(legacy)).state]) {
-      assert.equal(loaded.version, 10);
+      assert.equal(loaded.version, 11);
       assert.equal(loaded.rebirthCount, 0);
       assert.equal(loaded.coins, legacy.coins);
       assert.deepEqual(loaded.inventory, legacy.inventory);
