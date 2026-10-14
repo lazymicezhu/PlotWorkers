@@ -27,8 +27,9 @@ function saveDate(value: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "旧版存档";
 }
 
-export function SettingsDialog({ game, onClose, onImport, onReset, performanceEnabled, onPerformanceChange, resourceChangesEnabled, onResourceChangesChange, rebirth }: {
+export function SettingsDialog({ game, backupKey = SAVE_BACKUP_KEY, onClose, onImport, onReset, performanceEnabled, onPerformanceChange, resourceChangesEnabled, onResourceChangesChange, rebirth }: {
   game: GameState;
+  backupKey?: string;
   onClose: () => void;
   onImport: (state: GameState) => void;
   onReset: () => void;
@@ -54,13 +55,13 @@ export function SettingsDialog({ game, onClose, onImport, onReset, performanceEn
 
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(SAVE_BACKUP_KEY);
+      const stored = localStorage.getItem(backupKey);
       // Backup metadata is browser-only and optional.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (stored) setBackup(parseGameSave(stored));
+      setBackup(stored ? parseGameSave(stored) : null);
     } catch { /* An unavailable or obsolete backup must not block settings. */ }
     return () => { readId.current += 1; };
-  }, []);
+  }, [backupKey]);
 
   function navigate(next: Page) {
     readId.current += 1;
@@ -134,7 +135,7 @@ export function SettingsDialog({ game, onClose, onImport, onReset, performanceEn
     }
     // Import has already succeeded; unavailable backup metadata is not an import failure.
     try {
-      const stored = localStorage.getItem(SAVE_BACKUP_KEY);
+      const stored = localStorage.getItem(backupKey);
       setBackup(stored ? parseGameSave(stored) : null);
     } catch { setBackup(null); }
     setMessage(preview.backup ? "已恢复备份，恢复前的进度已另存为备份。" : "导入成功，原来的进度已自动备份。");
@@ -153,7 +154,7 @@ export function SettingsDialog({ game, onClose, onImport, onReset, performanceEn
     import: preview?.backup ? "恢复备份" : "导入存档",
   };
   const back = page === "home" ? undefined : goBack;
-  const row = (label: string, destination: Page, value?: string, asset = false) => <button className={`${styles.row} ${asset ? styles.asset : ""}`} onClick={() => navigate(destination)}>
+  const row = (label: string, destination: Page, value?: string, asset = false) => <button data-feedback-size="wide" className={`${styles.row} ${asset ? styles.asset : ""}`} onClick={() => navigate(destination)}>
     <span>{label}</span>{value && <span className={styles.value}>{value}</span>}<span className={styles.chevron} aria-hidden="true">›</span>
   </button>;
 

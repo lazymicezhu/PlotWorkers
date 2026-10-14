@@ -17,7 +17,7 @@ function advancedSave() {
   game.synthesisPlots["synthesis-1"] = { recipe: "rebar", produced: 30, batch: { active: true, progress: .42, reserved: { rough: 10, refined: 5, screws: 2 } } };
   game.orders = [{ id: "order-1", remaining: 178, processed: { kind: "rough", amount: 20 }, synthesized: { kind: "rebar", amount: 10 }, reward: "special" }];
   game.orderSerial = 1;
-  game.effects = { canOpener: 45, smartLeader: 150, holyLight: { x: -5, y: 30, remaining: 100 } };
+  game.effects = { canOpener: 45, smartLeader: 150, holyLight: [{ id: "holy-light", x: -5, y: 30, remaining: 100 }] };
   game.autoCanSupply = true;
   game.autoSchedulerSupply = true;
   game.schedulerServiceUnlocked = true;
@@ -38,6 +38,15 @@ test("save package round trip retains economy, upgrades, orders and reserved bat
   assert.deepEqual(loaded.state, game);
   assert.deepEqual(game, before, "export never changes the live game");
   assert.doesNotThrow(() => stepGame(loaded.state, 1, () => .5));
+});
+
+test("older robot efficiency above 150 percent imports at the new cap", () => {
+  const game = advancedSave();
+  game.schedulerRobots[0].efficiency = 2.1;
+  const loaded = parse(game);
+  assert.equal(loaded.schedulerRobots[0].efficiency, 1.5);
+  assert.equal(loaded.coins, game.coins);
+  assert.equal(game.schedulerRobots[0].efficiency, 2.1, "import does not mutate its source");
 });
 
 test("export restores temporary dragging to playable status without returning reserved materials", () => {
@@ -181,7 +190,7 @@ test("orders, robot duties and timed effects must be safe for render and simulat
     (game) => { game.schedulerRobots[0] = null; },
     (game) => { game.inventory.screws = null; },
     (game) => { game.research.orders = "2"; },
-    (game) => { game.effects.holyLight.remaining = "100"; },
+    (game) => { game.effects.holyLight[0].remaining = "100"; },
     (game) => { game.effects.smartLeader = "abc"; },
   ];
   for (const change of changes) { const game = advancedSave(); change(game); assert.throws(() => parse(game), /无效/); }

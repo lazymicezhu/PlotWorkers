@@ -1,12 +1,12 @@
 .root { display:contents; }
-.launcher { position:fixed; z-index:5300; right:20px; bottom:max(16px,env(safe-area-inset-bottom)); display:grid; place-items:center; width:88px; height:72px; padding:0; border:0; border-radius:13px; background:transparent; cursor:pointer; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+.launcher { position:fixed; z-index:5300; right:20px; bottom:max(16px,env(safe-area-inset-bottom)); display:grid; place-items:center; width:176px; height:144px; padding:0; border:0; border-radius:26px; background:transparent; cursor:pointer; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
 .launcher:focus-visible { outline:2px solid #789b64; outline-offset:3px; }
-.sprite { display:block; width:88px; height:88px; background-image:url('/tablet/tablet-idle.png'); background-size:100% 100%; background-repeat:no-repeat; background-position:0 0; }
+.sprite { display:block; width:176px; height:176px; background-image:url('/tablet/tablet-idle.png'); background-size:100% 100%; background-repeat:no-repeat; background-position:0 0; }
 .spriteOpening,.spriteClosing { background-size:800% 600%; animation-name:tabletFrames; animation-timing-function:step-end; animation-iteration-count:1; }
 .spriteOpening { background-image:url('/tablet/tablet-open.png'); animation-duration:720ms; }
 .spriteClosing { background-image:url('/tablet/tablet-close.png'); animation-duration:640ms; }
-.notificationDot { position:absolute; right:11px; top:14px; width:7px; height:7px; border:1.5px solid #f1f3eb; border-radius:50%; background:#c79a57; pointer-events:none; }
-.launcherTooltip { position:absolute; right:88px; top:27px; padding:7px 10px; border-radius:8px; background:#f8faf5; box-shadow:0 2px 12px #33493212; color:#627256; font:11px/1.3 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; white-space:nowrap; opacity:0; transition:opacity 120ms; pointer-events:none; }
+.notificationDot { position:absolute; right:22px; top:28px; width:7px; height:7px; border:1.5px solid #f1f3eb; border-radius:50%; background:#c79a57; pointer-events:none; }
+.launcherTooltip { position:absolute; right:176px; top:50%; transform:translateY(-50%); padding:7px 10px; border-radius:8px; background:#f8faf5; box-shadow:0 2px 12px #33493212; color:#627256; font:11px/1.3 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; white-space:nowrap; opacity:0; transition:opacity 120ms; pointer-events:none; }
 .launcher:hover .launcherTooltip,.launcher:focus-visible .launcherTooltip { opacity:1; }
 .stage { position:fixed; z-index:5250; width:calc(900px * var(--tablet-scale,1)); height:calc(675px * var(--tablet-scale,1)); pointer-events:none; transform-origin:95% 110%; transition-property:opacity,transform; }
 .entering { opacity:1; transform:translateY(0) scale(1); transition-duration:360ms; transition-timing-function:cubic-bezier(.18,.75,.25,1); }

@@ -33,7 +33,7 @@ test("first rebirth resets all progress and grants exactly one playable foreman 
   game.schedulerRobots.push({ efficiency: 5, intervalSeconds: .2, duties: { rest: false, work: true, wake: false } });
   game.research = { synthesis: 3, orders: 2 };
   game.autoCanSupply = game.autoSchedulerSupply = game.schedulerServiceUnlocked = true;
-  game.effects = { canOpener: 30, smartLeader: 60, holyLight: { x: 200, y: 400, remaining: 100 } };
+  game.effects = { canOpener: 30, smartLeader: 60, holyLight: [{ id: "holy-light", x: 200, y: 400, remaining: 100 }] };
   game.plotPurchases = { gather: 2, process: 3, synthesis: 1, living: 4 };
   game.plots.push({ ...game.plots[0], id: "extra-gather" });
   game.workers.push({ ...game.workers[0], id: "worker-2" });

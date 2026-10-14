@@ -14,7 +14,7 @@ const synthesisPlot = () => ({ id: "synthesis", type: "synthesis", name: "合成
 
 test("initial assets include free workers, plots and the initial robot", () => {
   const result = saveValuation(fresh());
-  assert.equal(result.version, 1);
+  assert.equal(result.version, 2);
   assert.equal(result.total, 3940);
   assert.deepEqual(result.items.map(({ id, value }) => [id, value]), [
     ["coins", 100], ["inventory", 40], ["workers", 100], ["plots", 2700],
@@ -97,7 +97,18 @@ test("robot upgrade levels are counted exactly despite decimal representation", 
     assert.equal(saveValuation(game).total, total);
   }
   assert.equal(game.schedulerRobots[0].intervalSeconds, .1);
-  assert.equal(itemValue(game, "robots"), 6800);
+  assert.equal(game.schedulerRobots[0].efficiency, 1.5);
+  assert.equal(itemValue(game, "robots"), 6400);
+});
+
+test("robot efficiency replacement value uses two-point upgrades and stops at the cap", () => {
+  const game = fresh();
+  game.schedulerRobots[0].efficiency = 1.17;
+  assert.equal(itemValue(game, "robots"), 1900);
+  game.schedulerRobots[0].efficiency = 1.5;
+  assert.equal(itemValue(game, "robots"), 3500);
+  game.schedulerRobots[0].efficiency = 5;
+  assert.equal(itemValue(game, "robots"), 3500);
 });
 
 test("workers use cumulative current replacement cost across price tiers", () => {
@@ -122,7 +133,7 @@ test("orders, special items, temporary effects and old production counters have 
   const game = fresh();
   const expected = saveValuation(game);
   game.inventory.specials = { canOpener: 20, smartLeader: 30, holyLight: 40 };
-  game.effects = { canOpener: 500, smartLeader: 600, holyLight: { x: 0, y: 0, remaining: 120 } };
+  game.effects = { canOpener: 500, smartLeader: 600, holyLight: [{ id: "holy-light", x: 0, y: 0, remaining: 120 }] };
   game.orders = [{ id: "pending", remaining: 100, processed: { kind: "rough", amount: 1000 }, synthesized: { kind: "rebar", amount: 500 }, reward: "special" }];
   game.processPlots.process.produced = 100000;
   assert.deepEqual(saveValuation(game), expected);

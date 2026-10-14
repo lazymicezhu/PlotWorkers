@@ -26,7 +26,7 @@ function isPair(id: ResourceId) {
   return id === "processed" || id === "products";
 }
 
-export function ResourceHud({ game, activity, showChanges, onSettings }: { game: GameState; activity: ResourceActivity; showChanges: boolean; onSettings: () => void }) {
+export function ResourceHud({ game, activity, showChanges, onSettings, infiniteResources = false }: { game: GameState; activity: ResourceActivity; showChanges: boolean; onSettings: () => void; infiniteResources?: boolean }) {
   const { coins, schedulerSeconds, schedulerBots } = game;
   const { raw, cans, rough, refined, screws, rebar } = game.inventory;
   const values = useMemo<Snapshot>(() => ({
@@ -104,8 +104,8 @@ export function ResourceHud({ game, activity, showChanges, onSettings }: { game:
   }, [selected]);
 
   const details = selected && (selected.id === "robot"
-    ? `${formatHudExact(schedulerSeconds)} 秒 / ${formatHudExact(schedulerBots)} 台`
-    : values[selected.id].map(formatHudExact).join(" / "));
+    ? `${infiniteResources ? "无限时间" : `${formatHudExact(schedulerSeconds)} 秒`} / ${formatHudExact(schedulerBots)} 台`
+    : infiniteResources ? "无限" : values[selected.id].map(formatHudExact).join(" / "));
 
   return <header
     ref={headerRef}
@@ -128,7 +128,7 @@ export function ResourceHud({ game, activity, showChanges, onSettings }: { game:
   >
     {resources.map(({ id, label }) => {
       const paired = isPair(id);
-      const warning = id === "raw" ? raw <= 0 : id === "cans" ? cans < 20 : id === "robot" && schedulerSeconds < 60;
+      const warning = !infiniteResources && (id === "raw" ? raw <= 0 : id === "cans" ? cans < 20 : id === "robot" && schedulerSeconds < 60);
       const className = [styles.card, paired ? styles.pair : "", id === "robot" ? styles.robot : "", id === "coins" ? styles.gold : "", warning ? styles.warning : ""].filter(Boolean).join(" ");
       if (id === "robot" && schedulerBots <= 0) return <div key={id} className={`${className} ${styles.empty}`} aria-hidden="true" />;
       const changes = showChanges ? receipts[id] : undefined;
@@ -145,9 +145,9 @@ export function ResourceHud({ game, activity, showChanges, onSettings }: { game:
       >
         <span className={styles.caption}>{label}</span>
         <strong className={styles.values}>
-          {id === "robot" ? <span className={styles.number}>{formatHudNumber(values.robot[0], true)}s/{formatHudNumber(schedulerBots, true)}台</span>
-            : paired ? <><span className={styles.number}>{formatHudNumber(values[id][0], true)}</span><span className={styles.divider}>/</span><span className={styles.number}>{formatHudNumber(values[id][1], true)}</span></>
-              : <span className={styles.number}>{formatHudNumber(values[id][0])}</span>}
+          {id === "robot" ? <span className={styles.number}>{infiniteResources ? "∞" : formatHudNumber(values.robot[0], true)}s/{formatHudNumber(schedulerBots, true)}台</span>
+            : paired ? <><span className={styles.number}>{infiniteResources ? "∞" : formatHudNumber(values[id][0], true)}</span><span className={styles.divider}>/</span><span className={styles.number}>{infiniteResources ? "∞" : formatHudNumber(values[id][1], true)}</span></>
+              : <span className={styles.number}>{infiniteResources ? "∞" : formatHudNumber(values[id][0])}</span>}
         </strong>
         {changes?.gain && <span key={changes.gain.id} className={`${styles.change} ${styles.gain}`} data-resource-change="gain" aria-hidden="true">{changes.gain.text}</span>}
         {changes?.loss && <span key={changes.loss.id} className={`${styles.change} ${styles.loss}`} data-resource-change="loss" aria-hidden="true">{changes.loss.text}</span>}

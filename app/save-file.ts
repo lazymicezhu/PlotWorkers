@@ -1,4 +1,4 @@
-import { orderCoinReward, parseSavedState } from "./game-engine.ts";
+import { SCHEDULER_EFFICIENCY_MAX, orderCoinReward, parseSavedState } from "./game-engine.ts";
 import type { GameState } from "./game-engine.ts";
 
 export const MAX_SAVE_FILE_BYTES = 5 * 1024 * 1024;
@@ -45,6 +45,24 @@ function boolean(value: unknown, field: string) {
 function list(value: unknown, field: string): unknown[] {
   if (!Array.isArray(value) || value.length > MAX_COLLECTION_SIZE) invalid(field);
   return value;
+}
+
+function checkHolyLight(value: unknown): ObjectValue {
+  const holyLight = object(value, "圣光洗礼");
+  number(holyLight.x, "圣光位置", -Number.MAX_SAFE_INTEGER);
+  number(holyLight.y, "圣光位置", -Number.MAX_SAFE_INTEGER);
+  number(holyLight.remaining, "圣光剩余时间");
+  return holyLight;
+}
+
+function checkHolyLights(value: unknown) {
+  const holyLightIds = new Set<string>();
+  for (const rawHolyLight of list(value, "圣光洗礼")) {
+    const holyLight = checkHolyLight(rawHolyLight);
+    const holyLightId = id(holyLight.id, "圣光编号");
+    if (holyLightIds.has(holyLightId)) invalid("重复圣光编号");
+    holyLightIds.add(holyLightId);
+  }
 }
 
 // The legacy migrator allocates schedulerBots entries. Bound untrusted input
@@ -130,7 +148,7 @@ function checkState(state: GameState) {
   if (robots.length !== state.schedulerBots) invalid("机器人数量");
   for (const rawRobot of robots) {
     const robot = object(rawRobot, "机器人");
-    number(robot.efficiency, "机器人效率", 1);
+    number(robot.efficiency, "机器人效率", 1, SCHEDULER_EFFICIENCY_MAX);
     number(robot.intervalSeconds, "机器人间隔", .1, 3);
     const duties = object(robot.duties, "机器人职责");
     for (const key of ["rest", "work", "wake"]) boolean(duties[key], `机器人职责.${key}`);
@@ -141,12 +159,7 @@ function checkState(state: GameState) {
   const effects = object(state.effects, "道具效果");
   number(effects.canOpener, "罐头起子时间");
   number(effects.smartLeader, "智械领袖时间");
-  if (effects.holyLight !== null) {
-    const holyLight = object(effects.holyLight, "圣光洗礼");
-    number(holyLight.x, "圣光位置", -Number.MAX_SAFE_INTEGER);
-    number(holyLight.y, "圣光位置", -Number.MAX_SAFE_INTEGER);
-    number(holyLight.remaining, "圣光剩余时间");
-  }
+  checkHolyLights(effects.holyLight);
 
   const orderIds = new Set<string>();
   for (const order of state.orders) {
@@ -171,6 +184,13 @@ function checkProvidedValues(raw: ObjectValue) {
   if (inventory.specials !== undefined) {
     const specials = object(inventory.specials, "特殊物品");
     for (const key of ["canOpener", "smartLeader", "holyLight"]) if (specials[key] !== undefined) number(specials[key], `特殊物品.${key}`, 0, Number.MAX_SAFE_INTEGER, true);
+  }
+  if (raw.effects !== undefined) {
+    const effects = object(raw.effects, "道具效果");
+    if (effects.holyLight !== undefined && effects.holyLight !== null) {
+      if (Array.isArray(effects.holyLight)) checkHolyLights(effects.holyLight);
+      else checkHolyLight(effects.holyLight);
+    }
   }
   for (const key of ["schedulerSeconds", "canOpenerSeconds", "canOpenerCooldown", "orderElapsed", "orderSerial"]) if (raw[key] !== undefined) number(raw[key], key);
   for (const key of ["autoCanSupply", "autoSchedulerSupply", "schedulerServiceUnlocked"]) if (raw[key] !== undefined) boolean(raw[key], key);

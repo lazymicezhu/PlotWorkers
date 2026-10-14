@@ -17,6 +17,7 @@ import {
   createInitialState,
   gatherAttributeRate,
   nextPlotPrice,
+  parseSavedState,
   orderCoinReward,
   placeHolyLight,
   randomMarketPrice,
@@ -297,12 +298,43 @@ test("each scheduler robot can upgrade speed and interval independently", () => 
   efficiencyGame.coins = 100;
   const faster = upgradeSchedulerEfficiency(efficiencyGame, 0);
   assert.equal(faster.coins, 0);
-  assert.equal(faster.schedulerRobots[0].efficiency, 1.01);
+  assert.equal(faster.schedulerRobots[0].efficiency, 1.02);
+  assert.equal(faster.schedulerRobots[1].efficiency, 1);
   const intervalGame = buySchedulerBot({ ...state(), coins: 1000 });
   intervalGame.coins = 100;
   const shorter = upgradeSchedulerInterval(intervalGame, 0);
   assert.equal(shorter.coins, 0);
   assert.equal(shorter.schedulerRobots[0].intervalSeconds, 2.9);
+});
+
+test("scheduler efficiency reaches 150 percent in 25 upgrades and stops charging", () => {
+  let game = { ...state(), coins: 10_000 };
+  for (let level = 1; level <= 25; level += 1) {
+    game = upgradeSchedulerEfficiency(game, 0);
+    assert.equal(game.schedulerRobots[0].efficiency, (100 + level * 2) / 100);
+    assert.equal(game.coins, 10_000 - level * 100);
+  }
+  assert.equal(upgradeSchedulerEfficiency(game, 0), game);
+});
+
+test("scheduler efficiency clamps the last legacy odd-percent upgrade and rejects unavailable upgrades", () => {
+  const game = state();
+  game.schedulerRobots[0].efficiency = 1.49;
+  const capped = upgradeSchedulerEfficiency(game, 0);
+  assert.equal(capped.schedulerRobots[0].efficiency, 1.5);
+  assert.equal(capped.coins, 0);
+  const poor = { ...game, coins: 99 };
+  assert.equal(upgradeSchedulerEfficiency(poor, 0), poor);
+  assert.equal(upgradeSchedulerEfficiency(game, 1), game);
+});
+
+test("saved robot efficiency respects the cap while preserving existing odd-percent upgrades", () => {
+  const game = buySchedulerBot({ ...state(), coins: 1000 });
+  game.schedulerRobots[0].efficiency = 1.8;
+  game.schedulerRobots[1].efficiency = 1.17;
+  const loaded = parseSavedState(JSON.stringify(game));
+  assert.deepEqual(loaded.schedulerRobots.map(robot => robot.efficiency), [1.5, 1.17]);
+  assert.equal(loaded.coins, game.coins);
 });
 
 test("full living area is freed before an exhausted worker is moved in", () => {
@@ -320,6 +352,101 @@ test("full living area is freed before an exhausted worker is moved in", () => {
   assert.equal(freeSpace.targetId, "process");
   game.workers = game.workers.map((worker) => worker.id === "rest-1" ? { ...worker, zoneId: "process", status: "idle" } : worker);
   assert.deepEqual(chooseAutoDispatch(game), { workerId: "tired", targetId: "living", action: "rest" });
+});
+
+test("rest, work and wake each get a turn while all three kinds of task remain available", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.workers = [
+    { ...base, id: "tired", zoneId: "gather", status: "exhausted", mood: 0 },
+    { ...base, id: "ready", zoneId: "living", status: "ready", mood: 100 },
+    { ...base, id: "slacker", zoneId: "gather", status: "slacking", mood: 80 },
+  ];
+  const duties = { rest: true, work: true, wake: true };
+  const orders = [["rest", "work", "wake"], ["work", "wake", "rest"], ["wake", "rest", "work"]];
+  const expected = [
+    { workerId: "tired", targetId: "living", action: "rest" },
+    { workerId: "ready", targetId: "process", action: "work" },
+    { workerId: "slacker", targetId: "gather", action: "wake" },
+  ];
+  for (let turn = 0; turn < 9; turn += 1) {
+    const index = turn % orders.length;
+    assert.deepEqual(chooseAutoDispatch(game, [], [], duties, orders[index]), expected[index]);
+  }
+});
+
+test("rotation immediately skips unavailable or disabled duties without dropping later work", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.workers = [
+    { ...base, id: "ready", zoneId: "living", status: "ready", mood: 100 },
+    { ...base, id: "slacker", zoneId: "gather", status: "slacking", mood: 80 },
+  ];
+  assert.deepEqual(chooseAutoDispatch(game, [], [], undefined, ["rest", "work", "wake"]), {
+    workerId: "ready", targetId: "process", action: "work",
+  });
+  assert.deepEqual(chooseAutoDispatch(game, [], [], { rest: true, work: false, wake: true }, ["work", "wake", "rest"]), {
+    workerId: "slacker", targetId: "gather", action: "wake",
+  });
+  assert.deepEqual(chooseAutoDispatch(game, ["slacker"], [], undefined, ["wake", "rest", "work"]), {
+    workerId: "ready", targetId: "process", action: "work",
+  });
+  assert.equal(chooseAutoDispatch(game, [], [], { rest: false, work: false, wake: false }, ["wake", "rest", "work"]), null);
+});
+
+test("full living relief waits its turn and chooses the most recovered available worker", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.workers = [
+    { ...base, id: "tired", zoneId: "gather", status: "exhausted", mood: 0 },
+    { ...base, id: "slacker", zoneId: "gather", status: "slacking", mood: 80 },
+    ...[30, 70, 50, 10].map((mood) => ({ ...base, id: `rest-${mood}`, zoneId: "living", status: "resting", mood })),
+  ];
+  assert.deepEqual(chooseAutoDispatch(game, [], [], undefined, ["wake", "rest", "work"]), {
+    workerId: "slacker", targetId: "gather", action: "wake",
+  });
+  assert.deepEqual(chooseAutoDispatch(game, [], [], undefined, ["rest", "work", "wake"]), {
+    workerId: "rest-70", targetId: "process", action: "work",
+  });
+  assert.deepEqual(chooseAutoDispatch(game, ["rest-70"], [], undefined, ["rest", "work", "wake"]), {
+    workerId: "rest-50", targetId: "process", action: "work",
+  });
+  assert.deepEqual(chooseAutoDispatch(game, [], [], { rest: true, work: false, wake: true }, ["rest", "work", "wake"]), {
+    workerId: "slacker", targetId: "gather", action: "wake",
+  });
+});
+
+test("rotating work assignments exclude busy and dragged workers and respect reserved capacity", () => {
+  const game = state();
+  const base = game.workers[0];
+  for (const plot of game.plots) { plot.cols = 4; plot.rows = 4; }
+  game.workers = [
+    { ...base, id: "assigned", zoneId: "living", status: "ready" },
+    { ...base, id: "dragged", zoneId: "living", status: "dragging" },
+    { ...base, id: "available", zoneId: "living", status: "ready" },
+    ...Array.from({ length: 3 }, (_, index) => ({ ...base, id: `gather-${index}`, zoneId: "gather", status: "gathering" })),
+    ...Array.from({ length: 4 }, (_, index) => ({ ...base, id: `process-${index}`, zoneId: "process", status: "processing" })),
+  ];
+  assert.deepEqual(chooseAutoDispatch(game, ["assigned"], [], undefined, ["work", "wake", "rest"]), {
+    workerId: "available", targetId: "gather", action: "work",
+  });
+  assert.equal(chooseAutoDispatch(game, ["assigned"], ["gather"], undefined, ["work", "wake", "rest"]), null);
+  assert.equal(chooseAutoDispatch(game, ["assigned", "available"], [], undefined, ["work", "wake", "rest"]), null);
+});
+
+test("rotating rest assignments cannot overbook the last living slot", () => {
+  const game = state();
+  const base = game.workers[0];
+  game.workers = [
+    { ...base, id: "assigned", zoneId: "gather", status: "exhausted", mood: 0 },
+    { ...base, id: "available", zoneId: "gather", status: "exhausted", mood: 0 },
+    ...Array.from({ length: 3 }, (_, index) => ({ ...base, id: `rest-${index}`, zoneId: "living", status: "resting", mood: 50 })),
+  ];
+  const restOnly = { rest: true, work: false, wake: false };
+  assert.deepEqual(chooseAutoDispatch(game, ["assigned"], [], restOnly, ["work", "wake", "rest"]), {
+    workerId: "available", targetId: "living", action: "rest",
+  });
+  assert.equal(chooseAutoDispatch(game, ["assigned"], ["living"], restOnly, ["work", "wake", "rest"]), null);
 });
 
 test("ready workers are distributed to the least occupied work plot", () => {
@@ -579,7 +706,9 @@ test("evacuation outranks rest, wake and work even when the ordinary worker come
       { ...base, id: "ordinary", status, zoneId, mood },
       { ...base, id: "evacuee", status: "gathering", zoneId: "gather", mood: 80 },
     ];
-    assert.deepEqual(chooseAutoDispatch(game), { workerId: "evacuee", targetId: "process", action: "evacuate" });
+    for (const order of [["rest", "work", "wake"], ["work", "wake", "rest"], ["wake", "rest", "work"]]) {
+      assert.deepEqual(chooseAutoDispatch(game, [], [], undefined, order), { workerId: "evacuee", targetId: "process", action: "evacuate" });
+    }
   }
 });
 

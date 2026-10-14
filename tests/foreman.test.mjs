@@ -70,7 +70,7 @@ for (const type of ["gather", "process", "synthesis"]) {
     const game = factory();
     game.workers = [foreman(type)];
     const plot = game.plots.find((item) => item.id === type);
-    game.effects.holyLight = { x: plot.x + plot.rows * 52, y: plot.y + plot.rows * 27, remaining: 60 };
+    game.effects.holyLight = [{ id: "holy-light", x: plot.x + plot.rows * 52, y: plot.y + plot.rows * 27, remaining: 60 }];
     const next = tick(game);
     if (type === "gather") assert.equal(next.inventory.raw - game.inventory.raw, 30);
     else close(next[type === "process" ? "processPlots" : "synthesisPlots"][type].batch.progress, 3 / (type === "process" ? 10 : 60));

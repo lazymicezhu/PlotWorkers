@@ -1,4 +1,4 @@
-import { RECIPES, RESEARCH, SYNTHESIS_SELL_PRICES, schedulerBotPrice, workerPurchasePrice } from "./game-engine.ts";
+import { RECIPES, RESEARCH, SCHEDULER_EFFICIENCY_MAX, SCHEDULER_EFFICIENCY_STEP, SYNTHESIS_SELL_PRICES, schedulerBotPrice, workerPurchasePrice } from "./game-engine.ts";
 import type { GameState, ResearchId } from "./game-engine.ts";
 
 export type SaveValuationItem = {
@@ -8,7 +8,7 @@ export type SaveValuationItem = {
 };
 
 export type SaveValuation = {
-  version: 1;
+  version: 2;
   total: number;
   items: SaveValuationItem[];
   note: string;
@@ -53,7 +53,9 @@ export function saveValuation(state: GameState): SaveValuation {
   const robots = state.schedulerRobots.reduce((sum, robot, index) => {
     // The initially granted robot has the same base value as the first purchase.
     const base = schedulerBotPrice({ ...state, schedulerBots: Math.max(1, index) });
-    const efficiencyLevels = Math.round(nonnegative(robot.efficiency - 1) * 100);
+    // Replacement cost uses today's upgrade step, including legacy odd percentages.
+    const efficiencyPoints = Math.round(Math.min(nonnegative(robot.efficiency - 1), SCHEDULER_EFFICIENCY_MAX - 1) * 100);
+    const efficiencyLevels = Math.ceil(efficiencyPoints / Math.round(SCHEDULER_EFFICIENCY_STEP * 100));
     const intervalLevels = Math.min(29, Math.round(nonnegative(3 - robot.intervalSeconds) * 10));
     return sum + base + (efficiencyLevels + intervalLevels) * 100;
   }, 0);
@@ -87,7 +89,7 @@ export function saveValuation(state: GameState): SaveValuation {
   for (let index = 0; index < remainingCoins; index += 1) items[remainderOrder[index].index].value += 1;
 
   return {
-    version: 1,
+    version: 2,
     total,
     items,
     note: "库存按固定基准价估算，包含生产中已预扣的材料；特殊物品暂未折价。",

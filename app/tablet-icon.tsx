@@ -1,6 +1,7 @@
 const drawings: Record<string, string> = {
   factory: '<path d="M3 20V10l6 3V8l6 3V4h4l2 16H3Z"/><path d="M7 16h1m4 0h1m4 0h1"/>',
   shop: '<path d="M3 9l2-5h14l2 5v3a3 3 0 0 1-6 0 3 3 0 0 1-6 0 3 3 0 0 1-6 0V9Z"/><path d="M5 15v6h14v-6M3 9h18M10 21v-5h4v5"/>',
+  research: '<path d="M9 3h6M10 3v6L4 19a1.3 1.3 0 0 0 1.1 2h13.8a1.3 1.3 0 0 0 1.1-2L14 9V3M7 14h10"/><path d="M10 17h.01M14 18h.01"/>',
   orders: '<rect x="5" y="4" width="14" height="17" rx="2"/><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M9 11h6M9 15h4"/>',
   box: '<path d="m3 7 9-4 9 4v10l-9 4-9-4V7Zm0 0 9 4 9-4M12 11v10M7.5 5l9 4"/>',
   bag: '<path d="M6 8h12l2 12H4L6 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2M9 13h6"/>',

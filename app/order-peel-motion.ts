@@ -74,7 +74,7 @@ export async function animateOrderPeel(slot: HTMLElement, paper: HTMLElement, la
       finishPeel = resolve;
       function draw(now: number) {
         if (aborted || !slot.isConnected || reduced.matches) { resolve(); return; }
-        const t = Math.min(1, (now - started) / 900);
+        const t = Math.min(1, (now - started) / 1200);
         const progress = t < .18 ? .045 * (t / .18) ** 2 : .045 + .955 * ((t - .18) / .82) ** 1.2;
         const crease = width - (width + height) * progress;
         paper.style.clipPath = clippedPaper(width, height, crease);
@@ -107,7 +107,7 @@ export async function animateOrderPeel(slot: HTMLElement, paper: HTMLElement, la
       collapse = slot.animate([
         { height: `${height}px`, marginBottom: "0px" },
         { height: "0px", marginBottom: `${-gap}px` },
-      ], { duration: 180, easing: "cubic-bezier(.3,0,.2,1)", fill: "forwards" });
+      ], { duration: 220, easing: "cubic-bezier(.3,0,.2,1)", fill: "forwards" });
       await collapse.finished.catch(() => {});
     }
     if (aborted || !slot.isConnected) return false;

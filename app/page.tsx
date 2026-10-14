@@ -24,6 +24,8 @@ import {
   PlotState,
   RECIPES,
   RESEARCH,
+  SCHEDULER_EFFICIENCY_MAX,
+  SCHEDULER_EFFICIENCY_STEP,
   SPECIAL_ITEM_NAMES,
   SYNTHESIS_RECIPES,
   SYNTHESIS_SELL_PRICES,
@@ -70,6 +72,8 @@ import type { SimulationStepRequest, SimulationStepResponse } from "./simulation
 import SimulationWorker from "./simulation.worker?worker";
 import { CanvasWorkers, getCanvasWorkerPosition, hitTestCanvasWorker, setCanvasWorkerHandoff, clearCanvasWorkerHandoffs } from "./worker-canvas";
 import { startWorkerTransfer } from "./worker-transfer";
+import { createTransportRunner } from "./transport-runner";
+import { transportDurationMs } from "./transport-motion";
 import { resolveWorkerDrop, workerAtPoint } from "./worker-drag";
 import { SCENE_DRAG_Z, sceneDepth } from "./scene-depth";
 import { BatchProgressBackground } from "./batch-progress";
@@ -90,10 +94,12 @@ import { saveFirstRebirth } from "./rebirth-save";
 import { RebirthReveal } from "./rebirth-reveal";
 import { RebirthTransition, rebirthTransitionStyles } from "./rebirth-transition";
 import { ResourceHud } from "./resource-hud";
-import { createGameView, updateGameView } from "./resource-activity";
+import { createGameView, resourceActivityBetween, updateGameView } from "./resource-activity";
 import { WorkshopTablet, type TabletPage } from "./workshop-tablet";
 import { TabletIcon } from "./tablet-icon";
 import { WorkshopOrders } from "./workshop-orders";
+import { useButtonFeedback } from "./use-button-feedback";
+import { isInfiniteResourcePreview, previewStorageKey, replenishPreviewResources } from "./preview-resources";
 import { snapshotTabletNotifications, reconcileTabletNotifications, type TabletNotificationSnapshot } from "./tablet-notifications";
 
 const TILE_W = 104;
@@ -107,8 +113,12 @@ const ZOOM_KEY = "green-realm-player-zoom";
 const PERFORMANCE_KEY = "green-realm-performance-display";
 const RESOURCE_CHANGES_KEY = "green-realm-resource-change-display";
 
+function preparePreviewGame(state: GameState) {
+  return isInfiniteResourcePreview() ? replenishPreviewResources(state) : state;
+}
+
 function persistGame(state: GameState) {
-  measureGameTask("save", () => localStorage.setItem(SAVE_KEY, JSON.stringify(state)));
+  measureGameTask("save", () => localStorage.setItem(previewStorageKey(SAVE_KEY), JSON.stringify(preparePreviewGame(state))));
 }
 // About 7% zoom per 100 CSS pixels, independent of wheel event frequency.
 const WHEEL_ZOOM_SENSITIVITY = .0007;
@@ -135,6 +145,7 @@ type AutoTransfer = {
   landing?: boolean;
   token: number;
   durationMs: number;
+  distanceBased?: boolean;
   action: "rest" | "work" | "wake" | "evacuate";
 };
 
@@ -182,12 +193,12 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
   const hasStatusBadge = !foreman && (worker.status === "exhausted" || worker.status === "ready" || worker.status === "slacking");
   return <div
     ref={elementRef}
-    className={`walker ${foreman ? "is-foreman" : ""} ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${automated && !autoTransfer?.active ? "is-auto-pickup" : ""} ${autoTransfer?.landing ? "is-auto-landing" : ""} ${autoTransfer?.action === "wake" && autoTransfer.active && !autoTransfer.landing ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
+    className={`walker ${foreman ? "is-foreman" : ""} ${dragging ? "is-dragging" : ""} ${automated ? "is-auto-dragging" : ""} ${autoTransfer?.distanceBased ? "is-distance-transport" : ""} ${automated && !autoTransfer?.active ? "is-auto-pickup" : ""} ${autoTransfer?.landing ? "is-auto-landing" : ""} ${autoTransfer?.action === "wake" && autoTransfer.active && !autoTransfer.landing ? "is-auto-waking" : ""} ${tracked || automated ? "is-tracked" : ""} ${hasStatusBadge ? "has-status-badge" : ""} ${hovered && !automated ? "is-paused" : ""} facing-${worker.facing}`}
     data-worker-id={worker.id}
     onPointerDown={(event) => onDown(event, worker.id)}
     onPointerEnter={(event) => onEnter(event, worker.id)}
     onPointerLeave={onLeave}
-    style={{ "--rebirth-delay": `${rebirthDelay}ms`, "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: raised ? PLOT_DRAG_Z + 1 + Math.round(projected.y) : dragging || automated ? SCENE_DRAG_Z : sceneDepth(projected.y, hasStatusBadge ? 20_000 : 0), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
+    style={{ "--rebirth-delay": `${rebirthDelay}ms`, "--worker-x": `${projected.x}px`, "--worker-y": `${projected.y}px`, zIndex: raised ? PLOT_DRAG_Z + (automated ? SCENE_DRAG_Z : sceneDepth(projected.y)) : dragging || automated ? SCENE_DRAG_Z : sceneDepth(projected.y, hasStatusBadge ? 20_000 : 0), "--move-duration": `${automated ? autoTransfer!.durationMs : worker.duration}ms` } as CSSProperties}
     role="button"
     aria-label={`${worker.name}，${STATUS_NAMES[worker.status]}`}
   >
@@ -209,6 +220,7 @@ const WalkerSprite = memo(function WalkerSprite({ worker, projected, autoTransfe
   previous.autoTransfer?.active === next.autoTransfer?.active &&
   previous.autoTransfer?.landing === next.autoTransfer?.landing &&
   previous.autoTransfer?.durationMs === next.autoTransfer?.durationMs &&
+  previous.autoTransfer?.distanceBased === next.autoTransfer?.distanceBased &&
   previous.dragging === next.dragging &&
   previous.tracked === next.tracked &&
   previous.hovered === next.hovered &&
@@ -303,6 +315,7 @@ const initialPoint = project(initialLiving, 2, 2);
 
 export default function PlotWorkersGame() {
   const viewportRef = useRef<HTMLElement>(null);
+  useButtonFeedback(viewportRef);
   const worldRef = useRef<HTMLDivElement>(null);
   const dragOrigin = useRef<WorkerState | null>(null);
   const draggingIdRef = useRef<string | null>(null);
@@ -323,7 +336,9 @@ export default function PlotWorkersGame() {
   const recycleBinRef = useRef<HTMLDivElement | null>(null);
   const autoTransfersRef = useRef<AutoTransfer[]>([]);
   const robotSchedulerRef = useRef<ReturnType<typeof createRobotScheduler> | null>(null);
-  const autoTransferControllersRef = useRef<Map<string, ReturnType<typeof startWorkerTransfer>>>(new Map());
+  const dispatchDutyOrderRef = useRef<SchedulerDuty[]>(["rest", "work", "wake"]);
+  const autoTransferControllersRef = useRef<Map<string, { cancel: () => void }>>(new Map());
+  const transportRunnerRef = useRef<ReturnType<typeof createTransportRunner> | null>(null);
   const movementCursorRef = useRef(0);
   const foremanCyclesRef = useRef(new Map<string, ForemanCycle>());
   const foremanCommandAtRef = useRef(new Map<string, number>());
@@ -335,9 +350,14 @@ export default function PlotWorkersGame() {
   const simulationLastTimeRef = useRef(0);
   const unsimulatedSecondsRef = useRef(0);
   const [gameView, setGameView] = useState(() => createGameView(createInitialState(initialPoint.x, initialPoint.y)));
+  const [infiniteResources, setInfiniteResources] = useState(false);
   const game = gameView.game;
+  const activeHolyLights = game.effects.holyLight.filter((effect) => effect.remaining > 0);
   const setGame = useCallback((update: SetStateAction<GameState>) => {
-    setGameView((view) => updateGameView(view, typeof update === "function" ? update(view.game) : update));
+    setGameView((view) => {
+      const next = typeof update === "function" ? update(view.game) : update;
+      return updateGameView(view, preparePreviewGame(next), resourceActivityBetween(view.game, next));
+    });
   }, []);
   const gameRef = useRef(game);
   const [zoom, setZoom] = useState(.62);
@@ -523,7 +543,7 @@ export default function PlotWorkersGame() {
           const next = reconcileSimulationWithActivity(pending.base, view.game, event.data, pending.seconds);
           if (measurementStart !== null) recordGameTask("simulation", (event.data.simulationMs ?? 0) + performance.now() - measurementStart);
           unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - pending.seconds);
-          return updateGameView(view, next.state, next.activity);
+          return updateGameView(view, preparePreviewGame(next.state), next.activity);
         });
       });
     };
@@ -540,12 +560,17 @@ export default function PlotWorkersGame() {
   }, []);
 
   useEffect(() => {
-    const saved = parseSavedState(localStorage.getItem(SAVE_KEY));
+    const preview = isInfiniteResourcePreview();
+    const stored = parseSavedState(localStorage.getItem(previewStorageKey(SAVE_KEY)))
+      ?? (preview ? parseSavedState(localStorage.getItem(SAVE_KEY)) : null);
+    const saved = preview ? replenishPreviewResources(stored ?? gameRef.current) : stored;
+    // Enable the local preview only after hydration; production keeps normal rules.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInfiniteResources(preview);
     if (saved) {
       gameRef.current = saved;
       tabletNotificationRef.current = snapshotTabletNotifications(saved);
       // Restore browser-only state after hydration; synchronous restoration is intentional.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGameView(createGameView(saved));
       setSelectedId(saved.workers[0]?.id ?? null);
     }
@@ -613,7 +638,7 @@ export default function PlotWorkersGame() {
               if (epoch !== simulationEpochRef.current) return view;
               unsimulatedSecondsRef.current = Math.max(0, unsimulatedSecondsRef.current - seconds);
               const next = measureGameTask("simulation", () => simulateElapsedWithActivity(view.game, seconds));
-              return updateGameView(view, next.state, next.activity);
+              return updateGameView(view, preparePreviewGame(next.state), next.activity);
             });
           });
         }
@@ -732,6 +757,14 @@ export default function PlotWorkersGame() {
 
   useEffect(() => {
     const autoTransferControllers = autoTransferControllersRef.current;
+    const transports = createTransportRunner({
+      now: () => performance.now(),
+      requestFrame: (callback) => window.requestAnimationFrame(callback),
+      cancelFrame: (frame) => window.cancelAnimationFrame(frame),
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (timer) => window.clearTimeout(timer),
+    });
+    transportRunnerRef.current = transports;
     const scheduler = createRobotScheduler({
       now: () => performance.now(),
       random: Math.random,
@@ -750,12 +783,21 @@ export default function PlotWorkersGame() {
       document.removeEventListener("visibilitychange", sync);
       autoTransferControllers.forEach((transition) => transition.cancel());
       autoTransferControllers.clear();
+      transports.dispose();
+      transportRunnerRef.current = null;
     };
     // Dispatch reads current state through refs; keep its timer across renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const schedulerActive = !rebirthSceneHidden && game.schedulerSeconds > 0 && !placingPlot && !plotDraft;
+  const robotSpeedBoostActive = game.effects.smartLeader > 0;
+  useEffect(() => {
+    // Catch committed plot moves, upgrades and buff expiry even in a hidden tab.
+    const transports = transportRunnerRef.current;
+    // Completion flushes the worker's placement; run it after the React commit.
+    queueMicrotask(() => transports?.refresh());
+  }, [game.plots, game.schedulerRobots, robotSpeedBoostActive, worldRevision]);
   useEffect(() => {
     robotSchedulerRef.current?.sync(game.schedulerBots, schedulerActive && document.visibilityState === "visible");
   }, [game.schedulerBots, schedulerActive, worldRevision]);
@@ -1054,6 +1096,7 @@ export default function PlotWorkersGame() {
       plotDraftRef.current = null;
       setPlotDraft(null);
       setOverRecycle(false);
+      transportRunnerRef.current?.refresh();
       return;
     }
     const point = positionInWorld(event.clientX, event.clientY);
@@ -1064,22 +1107,26 @@ export default function PlotWorkersGame() {
     };
     draft = { ...draft, plot: finalPlot, valid: validPlotPosition(finalPlot, gameRef.current.plots, plotId) };
     if (draft.valid) {
-      updateGame((current) => ({
+      // Commit before releasing the destination hold; its final coordinates
+      // must be visible to the runner before it can finish this assignment.
+      flushSync(() => updateGame((current) => ({
         ...current,
         plots: current.plots.map((plot) => plot.id === plotId ? draft.plot : plot),
         workers: current.workers.map((worker) => worker.zoneId === plotId ? { ...worker, ...project(draft.plot, worker.u, worker.v) } : worker),
-      }));
+      })));
       setNotice("地块位置已更新");
     } else setNotice("地块顶面不能与其他地块重叠");
     plotDraftRef.current = null;
     setPlotDraft(null);
     setOverRecycle(false);
+    transportRunnerRef.current?.refresh();
   }
 
   function onPlotCancel() {
     plotDraftRef.current = null;
     setPlotDraft(null);
     setOverRecycle(false);
+    transportRunnerRef.current?.refresh();
   }
 
   function beginPlotPlacement() {
@@ -1165,7 +1212,8 @@ export default function PlotWorkersGame() {
       current.schedulerSeconds <= 0 ||
       autoTransfersRef.current.some((transfer) => transfer.botIndex === botIndex) ||
       plotDraftRef.current ||
-      placingPlotRef.current
+      placingPlotRef.current ||
+      !transportRunnerRef.current
     ) return false;
 
     const decision = measureGameTask("dispatch", () => chooseAutoDispatch(
@@ -1173,6 +1221,7 @@ export default function PlotWorkersGame() {
       [...autoTransfersRef.current.map((transfer) => transfer.workerId), ...(draggingIdRef.current ? [draggingIdRef.current] : [])],
       autoTransfersRef.current.filter((transfer) => transfer.action !== "wake").map((transfer) => transfer.targetId),
       current.schedulerRobots[botIndex]?.duties,
+      dispatchDutyOrderRef.current,
     ));
     const worker = decision ? current.workers.find((item) => item.id === decision.workerId) : undefined;
     const target = decision ? current.plots.find((plot) => plot.id === decision.targetId) : undefined;
@@ -1189,51 +1238,99 @@ export default function PlotWorkersGame() {
     const v = waking ? atSource.v : .75 + Math.random() * Math.max(.5, target.rows - 1.5);
     const to = waking ? from : project(target, u, v);
     const robot = current.schedulerRobots[botIndex] ?? { efficiency: 1, intervalSeconds: 3, duties: { rest: true, work: true, wake: true } };
-    const durationMs = Math.max(450, Math.round((waking ? 1400 : 1800) / (robot.efficiency * (current.effects.smartLeader > 0 ? 2 : 1))));
+    const durationMs = waking
+      ? Math.max(450, Math.round(1400 / (robot.efficiency * (current.effects.smartLeader > 0 ? 2 : 1))))
+      : transportDurationMs(from, to, robot.efficiency, current.effects.smartLeader > 0 ? 2 : 1);
     const token = ++transferTokenRef.current;
-    const transfer: AutoTransfer = { token, botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, action: decision!.action };
+    const transfer: AutoTransfer = { token, botIndex, workerId: worker.id, targetId: target.id, u, v, from, to, active: false, durationMs, distanceBased: !waking, action: decision!.action };
     const isCurrent = () => epoch === simulationEpochRef.current && autoTransfersRef.current.some((value) => value.token === token);
     setGame((state) => ({ ...state, workers: state.workers.map((item) => item.id === worker.id ? { ...item, status: "dragging" } : item) }));
     replaceAutoTransfers((transfers) => [...transfers, transfer]);
-    const transition = startWorkerTransfer({
-      requestFrame: (callback) => window.requestAnimationFrame(callback),
-      cancelFrame: (frame) => window.cancelAnimationFrame(frame),
-      setTimer: (callback, ms) => window.setTimeout(callback, ms),
-      clearTimer: (timer) => window.clearTimeout(timer),
-    }, durationMs, {
-      activate: () => {
-        if (!isCurrent()) return;
-        replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, active: true } : value));
-      },
-      land: () => {
-        if (!isCurrent()) return;
-        replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, landing: true } : value));
-      },
-      complete: () => {
-        if (!isCurrent()) return;
-        const visible = renderedWorkerPosition(worker.id);
-        if (visible) setCanvasWorkerHandoff(worldRef.current, worker.id, visible);
-        flushSync(() => setGame((state) => {
-          if (epoch !== simulationEpochRef.current) return state;
-          const destination = state.plots.find((plot) => plot.id === target.id);
-          const source = state.plots.find((plot) => plot.id === worker.zoneId);
-          if (!destination || destination.enabled === false) {
-            return { ...state, workers: state.workers.map((item) => item.id === worker.id
-              ? { ...item, status: statusAfterDrop(item, source ?? null), duration: 500 } : item) };
+    const complete = () => {
+      if (!isCurrent()) return;
+      const visible = renderedWorkerPosition(worker.id);
+      if (visible) setCanvasWorkerHandoff(worldRef.current, worker.id, visible);
+      flushSync(() => setGame((state) => {
+        if (epoch !== simulationEpochRef.current) return state;
+        const destination = state.plots.find((plot) => plot.id === target.id);
+        const source = state.plots.find((plot) => plot.id === worker.zoneId);
+        if (!destination || destination.enabled === false) {
+          return { ...state, workers: state.workers.map((item) => item.id === worker.id
+            ? { ...item, status: statusAfterDrop(item, source ?? null), duration: 500 } : item) };
+        }
+        return { ...state, workers: state.workers.map((item) => item.id === worker.id ? {
+          ...item, zoneId: destination.id, u, v, ...project(destination, u, v),
+          status: statusAfterDrop(item, destination), duration: 500,
+          lastWorkZoneId: destination.type === "living" ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId) : destination.id,
+          continuousWork: 0, slowStacks: 0, lazyElapsed: 0, lazyCheckInterval: undefined,
+        } : item) };
+      }));
+      replaceAutoTransfers((transfers) => transfers.filter((value) => value.token !== token));
+      robotSchedulerRef.current?.complete(botIndex);
+      autoTransferControllersRef.current.delete(worker.id);
+    };
+    let transition: { cancel: () => void };
+    if (waking) {
+      transition = startWorkerTransfer({
+        requestFrame: (callback) => window.requestAnimationFrame(callback),
+        cancelFrame: (frame) => window.cancelAnimationFrame(frame),
+        setTimer: (callback, ms) => window.setTimeout(callback, ms),
+        clearTimer: (timer) => window.clearTimeout(timer),
+      }, durationMs, {
+        activate: () => {
+          if (isCurrent()) replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, active: true } : value));
+        },
+        land: () => {
+          if (isCurrent()) replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, landing: true } : value));
+        },
+        complete,
+      });
+    } else {
+      // Cache the two active sprites. The shared runner paints their world
+      // coordinates directly, without re-rendering the workshop every frame.
+      let walker: HTMLElement | null = null;
+      let gripper: HTMLElement | null = null;
+      let active = false;
+      let landing = false;
+      transition = transportRunnerRef.current!.start(worker.id, {
+        from,
+        getTarget: () => {
+          const draft = plotDraftRef.current?.plot;
+          const destination = draft?.id === target.id ? draft : gameRef.current.plots.find((plot) => plot.id === target.id);
+          return destination ? project(destination, u, v) : to;
+        },
+        getSpeed: () => ({
+          efficiency: gameRef.current.schedulerRobots[botIndex]?.efficiency ?? 1,
+          buff: gameRef.current.effects.smartLeader > 0 ? 2 : 1,
+        }),
+        canComplete: () => plotDraftRef.current?.plot.id !== target.id,
+        onUpdate: (sample) => {
+          if (!isCurrent()) return;
+          if (!walker?.isConnected) walker = worldRef.current?.querySelector<HTMLElement>(`[data-worker-id="${CSS.escape(worker.id)}"]`) ?? null;
+          if (!gripper?.isConnected) gripper = worldRef.current?.querySelector<HTMLElement>(`[data-transport-worker-id="${CSS.escape(worker.id)}"]`) ?? null;
+          walker?.style.setProperty("--worker-x", `${sample.point.x}px`);
+          walker?.style.setProperty("--worker-y", `${sample.point.y}px`);
+          if (gripper) {
+            gripper.style.left = `${sample.point.x}px`;
+            gripper.style.top = `${sample.point.y - 115}px`;
           }
-          return { ...state, workers: state.workers.map((item) => item.id === worker.id ? {
-            ...item, zoneId: destination.id, u, v, ...project(destination, u, v),
-            status: statusAfterDrop(item, destination), duration: 500,
-            lastWorkZoneId: destination.type === "living" ? (source && source.type !== "living" ? source.id : item.lastWorkZoneId) : destination.id,
-            continuousWork: 0, slowStacks: 0, lazyElapsed: 0, lazyCheckInterval: undefined,
-          } : item) };
-        }));
-        replaceAutoTransfers((transfers) => transfers.filter((value) => value.token !== token));
-        robotSchedulerRef.current?.complete(botIndex);
-        autoTransferControllersRef.current.delete(worker.id);
-      },
-    });
+          const nextActive = sample.phase !== "pickup";
+          const nextLanding = sample.phase === "landing" || sample.phase === "complete";
+          if (active !== nextActive || landing !== nextLanding) {
+            active = nextActive;
+            landing = nextLanding;
+            replaceAutoTransfers((transfers) => transfers.map((value) => value.token === token ? { ...value, active, landing } : value));
+          }
+        },
+        onComplete: complete,
+      });
+    }
     autoTransferControllersRef.current.set(worker.id, transition);
+    if (decision!.action !== "evacuate") {
+      // Share fairness across robots; a specialist must not reset other duties'
+      // waiting order. Advance on assignment, not on animation completion.
+      dispatchDutyOrderRef.current = [...dispatchDutyOrderRef.current.filter((duty) => duty !== decision!.action), decision!.action];
+    }
     return true;
   }
 
@@ -1246,7 +1343,7 @@ export default function PlotWorkersGame() {
       updateGame((current) => placeHolyLight(current, point.x, point.y));
       setPlacingHoly(false);
       setHolyPreview(null);
-      setNotice("圣光洗礼已放置，持续60秒");
+      setNotice("圣光洗礼已放置，本处独立持续60秒");
       return;
     }
     if (placingPlotRef.current) {
@@ -1339,6 +1436,7 @@ export default function PlotWorkersGame() {
   }
 
   function installGame(next: GameState) {
+    next = preparePreviewGame(next);
     rebirthPausedRef.current = false;
     rebirthSourceRef.current = null;
     setRebirthError("");
@@ -1352,7 +1450,9 @@ export default function PlotWorkersGame() {
     simulationLastTimeRef.current = performance.now();
     autoTransferControllersRef.current.forEach((transition) => transition.cancel());
     autoTransferControllersRef.current.clear();
+    transportRunnerRef.current?.cancelAll();
     robotSchedulerRef.current?.reset();
+    dispatchDutyOrderRef.current = ["rest", "work", "wake"];
     replaceAutoTransfers(() => []);
     dragCleanupRef.current?.();
     dragCleanupRef.current = null;
@@ -1395,7 +1495,7 @@ export default function PlotWorkersGame() {
   function importSave(next: GameState) {
     const backup = exportGameSave(gameRef.current);
     try {
-      localStorage.setItem(SAVE_BACKUP_KEY, backup);
+      localStorage.setItem(previewStorageKey(SAVE_BACKUP_KEY), backup);
       persistGame(next);
     } catch {
       throw new Error("浏览器无法保存存档，当前进度未替换。请先导出备份后重试。");
@@ -1424,6 +1524,7 @@ export default function PlotWorkersGame() {
     unsimulatedSecondsRef.current = 0;
     autoTransferControllersRef.current.forEach((transition) => transition.cancel());
     autoTransferControllersRef.current.clear();
+    transportRunnerRef.current?.cancelAll();
     robotSchedulerRef.current?.sync(gameRef.current.schedulerBots, false);
     finishPan();
     setTrackedId(null);
@@ -1458,7 +1559,7 @@ export default function PlotWorkersGame() {
     let fresh: GameState | null;
     try {
       fresh = saveFirstRebirth(source, {
-        backup: (previous) => localStorage.setItem(SAVE_BACKUP_KEY, exportGameSave(previous)),
+        backup: (previous) => localStorage.setItem(previewStorageKey(SAVE_BACKUP_KEY), exportGameSave(previous)),
         save: (next) => persistGame(next),
       });
     } catch {
@@ -1517,12 +1618,11 @@ export default function PlotWorkersGame() {
           {!game.autoCanSupply && <CanPurchaseRow selectedIndex={canPurchaseIndex} coins={game.coins} onChange={setCanPurchaseIndex} onBuy={(amount) => spend(() => buyCans(game, amount), `已购买${amount}个罐头`, "金币不足")} />}
           {!game.autoCanSupply && <AutoCanSupplyRow coins={game.coins} onBuy={() => spend(() => buyAutoCanSupply(game), "自动补给罐头已启用", "金币不足")} />}
           <ShopRow title="随机小人" icon="worker" description="随机属性 · 随机性格" meta={`当前 ${game.workers.length} 人`} price={workerPurchasePrice(game.workers.length)} disabled={game.coins < workerPurchasePrice(game.workers.length)} onClick={buyNewWorker} />
-          {!game.autoSchedulerSupply && <ShopRow title="自动调度服务" icon="robot" description="每次增加 60 秒" meta={`${game.schedulerBots} 台机器人 · 剩余 ${formatClock(game.schedulerSeconds)}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} />}
+          {!game.autoSchedulerSupply && <ShopRow title="自动调度服务" icon="robot" description="每次增加 60 秒" meta={`${game.schedulerBots} 台机器人 · 剩余 ${infiniteResources ? "∞" : formatClock(game.schedulerSeconds)}`} price={100} disabled={game.coins < 100} onClick={() => spend(() => buyScheduler(game), "自动调度已启用60秒", "金币不足")} />}
           {!game.autoSchedulerSupply && <AutoSchedulerSupplyRow coins={game.coins} onBuy={() => spend(() => buyAutoSchedulerSupply(game), "自动补充调度时间已启用", "金币不足")} />}
           <ShopRow title="增加调度机器人" icon="robot" description="提升同时调度数量" meta={`当前 ${game.schedulerBots} 台`} price={schedulerBotPrice(game)} disabled={game.coins < schedulerBotPrice(game)} onClick={() => spend(() => buySchedulerBot(game), `已增加第${game.schedulerBots + 1}台调度机器人`, "金币不足")} />
           <ShopRow title="新地块" icon="plots" description="选择地块类型与大小" meta={`当前 ${game.plots.length} 块`} priceSuffix="起" price={Math.min(...(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => nextPlotPrice(game, type, 4)))} disabled={false} onClick={() => setPanel("plotBuilder")} />
           </div>
-          <button className="tablet-research-entry" onClick={() => setPanel("research")}><TabletIcon name="factory" size={18} /><span>永久研究</span><TabletIcon name="arrow" size={16} /></button>
         </>}
         {panel === "plotBuilder" && <><h2>购买新地块</h2><div className="builder-options">{(["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => <button key={type} className={builderType === type ? "is-selected" : ""} onClick={() => setBuilderType(type)}>{ZONE_META[type].name}</button>)}</div><div className="builder-options size-options">{([4, 8] as const).map((size) => <button key={size} className={builderSize === size ? "is-selected" : ""} onClick={() => setBuilderSize(size)}>{size}×{size}<small>{nextPlotPrice(game, builderType, size)}金币 · 容纳{size * size / 4}人</small></button>)}</div><button className="primary-action" disabled={game.coins < selectedPlotPrice} onClick={beginPlotPlacement}>购买并选择位置 · {selectedPlotPrice}金币</button>{placingPlot && <button className="cancel-placement" onClick={cancelPurchasedPlot}>取消摆放</button>}</>}
         {panel === "sell" && <>
@@ -1533,13 +1633,13 @@ export default function PlotWorkersGame() {
             ["refined", "精加工", game.market.refinedPrice],
             ["screws", "螺丝", SYNTHESIS_SELL_PRICES.screws],
             ["rebar", "钢筋", SYNTHESIS_SELL_PRICES.rebar],
-          ] as const).map(([kind, name, price]) => <ProductSaleRow key={kind} name={name} stock={game.inventory[kind]} price={price} onSell={(amount) => updateGame((current) => sellProducts(current, kind, amount))} />)}
+          ] as const).map(([kind, name, price]) => <ProductSaleRow infiniteResources={infiniteResources} key={kind} name={name} stock={game.inventory[kind]} price={price} onSell={(amount) => updateGame((current) => sellProducts(current, kind, amount))} />)}
           <button className="sell-all" disabled={!game.inventory.rough && !game.inventory.refined && !game.inventory.screws && !game.inventory.rebar} onClick={() => updateGame((current) => sellProducts(current, "all"))}>全部出售</button>
         </>}
-        {panel === "inventory" && <><h2>特殊物品背包</h2>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><i className="tablet-item-icon"><TabletIcon name={id === "canOpener" ? "can" : id === "smartLeader" ? "robot" : "bolt"} size={21} /></i><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 60秒"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {Math.ceil(game.effects.holyLight?.remaining ?? 0)}s</div></>}
+        {panel === "inventory" && <><h2>特殊物品背包</h2>{(["canOpener", "smartLeader", "holyLight"] as SpecialItemId[]).map((id) => <div className="special-row" key={id}><i className="tablet-item-icon"><TabletIcon name={id === "canOpener" ? "can" : id === "smartLeader" ? "robot" : "bolt"} size={21} /></i><span><strong>{SPECIAL_ITEM_NAMES[id]} ×{infiniteResources ? "∞" : game.inventory.specials[id]}</strong><small>{id === "canOpener" ? "生活区恢复+50% · 120秒" : id === "smartLeader" ? "机器人搬运速度+100% · 120秒" : "放置半径8格圣圈，圈内采集/加工/合成效率+100%，人物不消耗心情 · 可同时放置多个，每处独立60秒，重叠不叠加"}</small></span><button disabled={game.inventory.specials[id] <= 0} onClick={() => activateSpecial(id)}>使用</button></div>)}<div className="effect-summary">生效中：罐头起子 {Math.ceil(game.effects.canOpener)}s · 智械领袖 {Math.ceil(game.effects.smartLeader)}s · 圣光 {activeHolyLights.length}处{activeHolyLights.length > 0 && `（${activeHolyLights.map((effect) => `${Math.ceil(effect.remaining)}s`).join(" / ")}）`}</div></>}
         {panel === "orders" && !game.plots.some((plot) => plot.type === "synthesis") && <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="orders" size={44} /></span><h2>第一张订单，等你开工</h2><p>建造一块合成区，就能开始接收工厂订单。</p><button className="primary-action" onClick={() => { setTabletPage("shop"); setBuilderType("synthesis"); setPanel("plotBuilder"); }}>建造合成区</button></div>}
         {panel === "orders" && game.plots.some((plot) => plot.type === "synthesis") && <WorkshopOrders game={game} onDeliver={deliverTabletOrder} onNotice={setNotice} />}
-        {panel === "research" && <><h2>永久研究</h2>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><i className="tablet-item-icon"><TabletIcon name="factory" size={21} /></i><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高订单金币奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
+        {panel === "research" && <><h2>研究</h2>{(Object.keys(RESEARCH) as ResearchId[]).map((id) => { const info = RESEARCH[id]; const level = game.research[id]; const cost = info.costs[level]; return <div className="research-row" key={id}><i className="tablet-item-icon"><TabletIcon name="research" size={21} /></i><span><strong>{info.name} · Lv.{level}/{info.costs.length}</strong><small>{id === "synthesis" ? "提高合成速度" : "提高订单金币奖励"}</small></span><button disabled={cost === undefined || game.coins < cost} onClick={() => spend(() => buyResearch(game, id), `${info.name}已升级`, "金币不足或已满级")}>{cost === undefined ? "已满级" : `${format(cost)}金币`}</button></div>; })}</>}
   </>;
 
   return (
@@ -1560,9 +1660,10 @@ export default function PlotWorkersGame() {
       onLostPointerCapture={finishPan}
       tabIndex={0}
     >
-      <ResourceHud key={`hud-${worldRevision}-${resourceChangesEnabled}`} game={game} activity={gameView.activity} showChanges={resourceChangesEnabled} onSettings={() => setSettingsOpen(true)} />
+      <ResourceHud key={`hud-${worldRevision}-${resourceChangesEnabled}`} game={game} activity={gameView.activity} showChanges={resourceChangesEnabled} infiniteResources={infiniteResources} onSettings={() => setSettingsOpen(true)} />
       {settingsOpen && <SettingsDialog
         game={game}
+        backupKey={infiniteResources ? previewStorageKey(SAVE_BACKUP_KEY) : SAVE_BACKUP_KEY}
         onClose={() => setSettingsOpen(false)}
         onImport={importSave}
         onReset={resetGame}
@@ -1581,7 +1682,7 @@ export default function PlotWorkersGame() {
       <PerformanceOverlay enabled={performanceEnabled} workers={game.workers.length} robots={game.schedulerBots} />
 
       <div key={`world-${worldRevision}`} className={`world ${rebirthSceneHidden ? rebirthTransitionStyles.worldDissolving : ""} ${game.workers.length > 150 ? "is-large-population" : ""} ${game.workers.length > 300 ? "is-massive-population" : ""}`} ref={worldRef} style={{ "--zoom": zoom } as CSSProperties}>
-        {game.effects.holyLight && <div className="ground-event holy-zone" style={{ left: game.effects.holyLight.x - 8 * 52, top: game.effects.holyLight.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(game.effects.holyLight.remaining)}s</span></div>}
+        {activeHolyLights.map((effect) => <div key={effect.id} className="ground-event holy-zone" style={{ left: effect.x - 8 * 52, top: effect.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光 · {Math.ceil(effect.remaining)}s</span></div>)}
         {placingHoly && holyPreview && <div className="ground-event holy-zone holy-preview" style={{ left: holyPreview.x - 8 * 52, top: holyPreview.y - 8 * 27, width: 8 * 104, height: 8 * 54 } as CSSProperties}><span>圣光覆盖范围 · 半径8格</span></div>}
         {visiblePlots.map((plot) => {
           const isPlacement = placingPlot?.plot.id === plot.id;
@@ -1590,7 +1691,7 @@ export default function PlotWorkersGame() {
           const count = workerCountByPlot.get(plot.id) ?? 0;
           const operational = plot.enabled !== false;
           const guarded = operational && guardedPlots.has(plot.id);
-          const holyBonus = operational && plot.type !== "living" && Boolean(game.effects.holyLight && circleHitsPlot(game.effects.holyLight.x, game.effects.holyLight.y, 8, plot));
+          const holyBonus = operational && plot.type !== "living" && game.effects.holyLight.some((effect) => effect.remaining > 0 && circleHitsPlot(effect.x, effect.y, 8, plot));
           return <section
             className={`plot plot-${plot.type} ${plot.enabled === false ? "is-disabled" : ""} ${holyBonus ? "has-holy-bonus" : ""} ${guarded ? "is-guarded" : ""} ${hoveredPlot === plot.id ? "is-hovered" : ""} ${isPlacement ? "is-placement" : ""} ${isMoving ? "is-relocating" : ""} ${!valid ? "has-collision" : ""}`}
             data-plot-id={plot.id}
@@ -1610,8 +1711,8 @@ export default function PlotWorkersGame() {
             <div className="plot-volume-highlight" aria-hidden="true"><span className="highlight-left" /><span className="highlight-right" /><span className="highlight-top" /></div>
             {!isPlacement && <div className="plot-hit" role="button" aria-label={`${plot.name}，按住拖动地块`} onPointerEnter={() => !draggingId && setHoveredPlot(plot.id)} onPointerLeave={() => !draggingId && setHoveredPlot(null)} onPointerDown={(event) => onPlotDown(event, plot)} onPointerMove={(event) => onPlotMove(event, plot)} onPointerUp={(event) => onPlotUp(event, plot.id)} onPointerCancel={onPlotCancel} />}
             <div className="zone-sign"><strong>{plot.name}</strong><span>{plot.cols}×{plot.rows} · {count}/{plotCapacity(plot)}人{plot.enabled === false ? " · 已停用" : ""}</span></div>
-            {!isPlacement && plot.type === "process" && <button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setTabletOpen(false); setPanel("process"); }}>配方</button>}
-            {!isPlacement && plot.type === "synthesis" && <button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setTabletOpen(false); setPanel("synthesis"); }}>合成</button>}
+            {!isPlacement && plot.type === "process" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setSelectedProcessPlotId(plot.id); setTabletOpen(false); setPanel("process"); }}>配方</button></div>}
+            {!isPlacement && plot.type === "synthesis" && <div className="plot-action-anchor"><button className="scene-action recipe-action" onClick={() => { setSelectedSynthesisPlotId(plot.id); setTabletOpen(false); setPanel("synthesis"); }}>合成</button></div>}
           </section>;
         })}
 
@@ -1621,23 +1722,27 @@ export default function PlotWorkersGame() {
           const autoTransfer = autoTransferByWorker.get(worker.id);
           const automated = Boolean(autoTransfer);
           const projected = automated
-            ? (autoTransfer!.active ? autoTransfer!.to : autoTransfer!.from)
+            ? (autoTransfer!.distanceBased ? autoTransfer!.from : autoTransfer!.active ? autoTransfer!.to : autoTransfer!.from)
             : draggingId === worker.id
             ? (dragPositionRef.current ?? { x: worker.x, y: worker.y })
             : !plot
               ? { x: worker.x, y: worker.y }
               : project(plot, worker.u, worker.v);
-          return <WalkerSprite key={worker.id} worldRef={worldRef} rebirthDelay={rebirthDelayByPlot.get(worker.zoneId ?? "") ?? 0} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id || selectedId === worker.id} hovered={hoveredWorker === worker.id} raised={plotDraft?.plot.id === worker.zoneId} foremanCommanding={commandingForemen.has(worker.id) && plot?.enabled !== false} onCommandEnd={finishForemanCycle} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={clearWorkerHover} />;
+          const raised = Boolean(plotDraft && (plotDraft.plot.id === worker.zoneId || plotDraft.plot.id === autoTransfer?.targetId));
+          return <WalkerSprite key={worker.id} worldRef={worldRef} rebirthDelay={rebirthDelayByPlot.get(worker.zoneId ?? "") ?? 0} worker={worker} projected={projected} autoTransfer={autoTransfer} dragging={draggingId === worker.id} tracked={trackedId === worker.id || selectedId === worker.id} hovered={hoveredWorker === worker.id} raised={raised} foremanCommanding={commandingForemen.has(worker.id) && plot?.enabled !== false} onCommandEnd={finishForemanCycle} onDown={onWorkerDown} onEnter={pauseWorkerAtCursor} onLeave={clearWorkerHover} />;
         })}
-        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => <div key={transfer.botIndex} className={`auto-gripper ${transfer.active ? "is-active" : ""} ${transfer.landing ? "is-landing" : ""}`} style={{ left: transfer.active ? transfer.to.x : transfer.from.x, top: (transfer.active ? transfer.to.y : transfer.from.y) - 115, zIndex: SCENE_DRAG_Z + transfer.botIndex + 1, "--robot-duration": `${transfer.durationMs}ms` } as CSSProperties}>🦾<span>{`${transfer.action === "evacuate" ? "优先撤离 · " : ""}调度机器人 ${transfer.botIndex + 1}`}</span></div>)}
+        {autoTransfers.filter((transfer) => transfer.action !== "wake").map((transfer) => {
+          const raised = plotDraft && (plotDraft.plot.id === transfer.targetId || game.workers.some((worker) => worker.id === transfer.workerId && worker.zoneId === plotDraft.plot.id));
+          return <div key={transfer.token} data-transport-worker-id={transfer.workerId} className={`auto-gripper is-distance-transport ${transfer.active ? "is-active" : ""} ${transfer.landing ? "is-landing" : ""}`} style={{ left: transfer.from.x, top: transfer.from.y - 115, zIndex: (raised ? PLOT_DRAG_Z : 0) + SCENE_DRAG_Z + transfer.botIndex + 1 }} >🦾<span>{`${transfer.action === "evacuate" ? "优先撤离 · " : ""}调度机器人 ${transfer.botIndex + 1}`}</span></div>;
+        })}
       </div>
 
-      <WorkshopTablet open={tabletOpen} activePage={tabletPage} onOpenChange={changeTabletOpen} onPageChange={selectTabletPage} unreadPages={tabletUnread} notificationVersion={tabletNotificationVersion} coins={game.coins} workerCount={game.workers.length}>
+      <WorkshopTablet infiniteResources={infiniteResources} open={tabletOpen} activePage={tabletPage} onOpenChange={changeTabletOpen} onPageChange={selectTabletPage} unreadPages={tabletUnread} notificationVersion={tabletNotificationVersion} coins={game.coins} workerCount={game.workers.length}>
         {tabletPage === "workers" || tabletPage === "plots" || (tabletPage === "robots" && game.schedulerServiceUnlocked) ?
-          <WorkerManager key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
+          <WorkerManager infiniteResources={infiniteResources} key={worldRevision} workers={game.workers} plots={game.plots} processPlots={game.processPlots} synthesisPlots={game.synthesisPlots} workerCounts={workerCountByPlot} selected={selectedWorker} trackedId={trackedId} activeSection={tabletPage as "workers" | "robots" | "plots"} coins={game.coins} robots={game.schedulerRobots} schedulerSeconds={game.schedulerSeconds} showRobots={game.schedulerServiceUnlocked} onSelect={(worker) => { trackWorker(worker); setTabletOpen(false); }} onToggle={selectTabletPage} onTogglePlot={toggleManagedPlot} onChangeProcessRecipe={(plotId, recipe) => updateGame((current) => changeRecipe(current, plotId, recipe))} onChangeSynthesisRecipe={(plotId, recipe) => updateGame((current) => changeSynthesisRecipe(current, plotId, recipe))} onToggleDuty={(index, duty) => updateGame((current) => toggleSchedulerDuty(current, index, duty))} onUpgradeEfficiency={(index) => updateGame((current) => upgradeSchedulerEfficiency(current, index))} onUpgradeInterval={(index) => updateGame((current) => upgradeSchedulerInterval(current, index))} /> : tabletPage === "robots" ?
           <div className="tablet-empty"><span aria-hidden="true"><TabletIcon name="robot" size={44} /></span><h2>让机器人搭把手</h2><p>开启自动调度服务，让机器人帮忙安排工作、休息和唤醒摸鱼的小人。</p><button className="primary-action" onClick={() => selectTabletPage("shop")}>去商店看看</button></div> :
           <div className="tablet-business-content" data-page={panel}>
-            {(panel === "plotBuilder" || panel === "research") && <button className="tablet-back" onClick={() => setPanel("shop")}>← 返回商店</button>}
+            {panel === "plotBuilder" && <button className="tablet-back" onClick={() => setPanel("shop")}>← 返回商店</button>}
             {panelContents}
           </div>}
       </WorkshopTablet>
@@ -1656,19 +1761,30 @@ export default function PlotWorkersGame() {
 }
 
 const WORKER_ROW_HEIGHT = 52;
+const WORKER_LIST_HEIGHT = 448;
 
 function VirtualWorkerList({ workers, selectedId, trackedId, onSelect }: { workers: WorkerState[]; selectedId?: string; trackedId: string | null; onSelect: (worker: WorkerState) => void }) {
   const [scrollTop, setScrollTop] = useState(0);
   const start = Math.max(0, Math.floor(scrollTop / WORKER_ROW_HEIGHT) - 3);
-  const end = Math.min(workers.length, start + 13);
-  return <div className="worker-list" style={{ height: Math.min(290, workers.length * WORKER_ROW_HEIGHT + 12) }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
+  const end = Math.min(workers.length, start + Math.ceil(WORKER_LIST_HEIGHT / WORKER_ROW_HEIGHT) + 6);
+  return <div className="worker-list" style={{ height: Math.min(WORKER_LIST_HEIGHT, workers.length * WORKER_ROW_HEIGHT + 12) }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
     <div className="worker-list-inner" style={{ height: workers.length * WORKER_ROW_HEIGHT }}>
-      {workers.slice(start, end).map((worker, offset) => <button key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} data-foreman={isForeman(worker) || undefined} onClick={() => onSelect(worker)}><i /><span><strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}</strong><small>{isForeman(worker) ? "守护工人" : STATUS_NAMES[worker.status]}</small></span><b>{isForeman(worker) ? "∞" : Math.round(worker.mood)}</b></button>)}
+      {workers.slice(start, end).map((worker, offset) => {
+        const foreman = isForeman(worker);
+        return <button type="button" key={worker.id} style={{ top: (start + offset) * WORKER_ROW_HEIGHT, "--mood": `${worker.mood}%` } as CSSProperties} className={selectedId === worker.id ? "is-selected" : ""} data-feedback-size="wide" data-foreman={foreman || undefined} title={`点击追踪${worker.name}`} onClick={() => onSelect(worker)}>
+          <i aria-hidden="true" />
+          <span className="worker-card-content">
+            <strong>{worker.name}{trackedId === worker.id ? " · 追踪中" : ""}{!foreman && <span className="worker-card-personality"> · {PERSONALITY_NAMES[worker.personality]}</span>}</strong>
+            <small>{foreman ? "守护工人 · 不消耗心情 · 区域生产／恢复 +100%" : `${STATUS_NAMES[worker.status]} · 体力 ${worker.stamina} · 效率 ${worker.efficiency} · 精力 ${worker.spirit}`}</small>
+          </span>
+          <b title="心情">{foreman ? "∞" : Math.round(worker.mood)}</b>
+        </button>;
+      })}
     </div>
   </div>;
 }
 
-function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, schedulerSeconds, showRobots, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
+function WorkerManager({ infiniteResources = false, workers, plots, processPlots, synthesisPlots, workerCounts, selected, trackedId, activeSection, coins, robots, schedulerSeconds, showRobots, onSelect, onToggle, onTogglePlot, onChangeProcessRecipe, onChangeSynthesisRecipe, onToggleDuty, onUpgradeEfficiency, onUpgradeInterval }: {
   workers: WorkerState[];
   plots: PlotState[];
   processPlots: GameState["processPlots"];
@@ -1679,6 +1795,7 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
   activeSection: "workers" | "robots" | "plots" | null;
   coins: number;
   robots: SchedulerRobotState[];
+  infiniteResources?: boolean;
   schedulerSeconds: number;
   showRobots: boolean;
   onSelect: (worker: WorkerState) => void;
@@ -1697,13 +1814,12 @@ function WorkerManager({ workers, plots, processPlots, synthesisPlots, workerCou
   const plotGroups = (["gather", "process", "synthesis", "living"] as ZoneType[]).map((type) => ({ type, plots: plots.filter((plot) => plot.type === type) }));
   return <aside className="worker-manager tablet-manager" onPointerDown={(event) => event.stopPropagation()}>
     <section className={`manager-section ${workersOpen ? "is-open" : ""}`}>
-    <div className="manager-head"><div><h2>人物管理</h2><p>{workers.length} 人</p></div><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
-    {workersOpen && <><VirtualWorkerList workers={workers} selectedId={selected?.id} trackedId={trackedId} onSelect={onSelect} />
-    {selected && !isForeman(selected) && <div className="manager-detail"><div><strong>{selected.name}</strong><span>{PERSONALITY_NAMES[selected.personality]}</span></div><p>心情 <b>{Math.round(selected.mood)}</b></p><div className="manager-stats"><span>体力<b>{selected.stamina}</b></span><span>效率<b>{selected.efficiency}</b></span><span>精力<b>{selected.spirit}</b></span></div><small>点击人物列表可追踪其当前位置</small></div>}</>}
+    <div className="manager-head"><div><h2>人物管理</h2><p>{workers.length} 人 · 点击卡片追踪人物</p></div><button className="manager-toggle" onClick={() => onToggle("workers")} aria-label={workersOpen ? "缩小人物管理" : "展开人物管理"}>{workersOpen ? "缩小" : "展开"}</button></div>
+    {workersOpen && <VirtualWorkerList workers={workers} selectedId={selected?.id} trackedId={trackedId} onSelect={onSelect} />}
     </section>
     {showRobots && <section className={`manager-section robot-section ${robotsOpen ? "is-open" : ""}`}>
-      <div className="manager-head"><div><h2>机器人管理</h2><p>{robots.length} 台 · 调度服务剩余 {formatClock(schedulerSeconds)}</p></div><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>
-      {robotsOpen && <div className="robot-management">{robots.map((robot, index) => <div className="robot-upgrade" key={index}><div><strong>机器人 {index + 1}</strong><span>效率 {Math.round(robot.efficiency * 100)}% · 间隔 {robot.intervalSeconds.toFixed(1)}s</span></div><fieldset className="robot-duties"><legend>分配职责</legend>{([['rest','送去休息'],['work','送去工作'],['wake','唤醒摸鱼']] as [SchedulerDuty,string][]).map(([duty, label]) => <label key={duty}><input type="checkbox" checked={robot.duties[duty]} onChange={() => onToggleDuty(index, duty)} /><span>{label}</span></label>)}</fieldset><button disabled={coins < 100} onClick={() => onUpgradeEfficiency(index)}>效率 +1%<small>100金币</small></button><button disabled={coins < 100 || robot.intervalSeconds <= .1} onClick={() => onUpgradeInterval(index)}>间隔 −0.1s<small>100金币</small></button></div>)}</div>}
+      <div className="manager-head"><div><h2>机器人管理</h2><p>{robots.length} 台 · 调度服务剩余 {infiniteResources ? "∞" : formatClock(schedulerSeconds)}</p></div><button className="manager-toggle" onClick={() => onToggle("robots")} aria-label={robotsOpen ? "缩小机器人管理" : "展开机器人管理"}>{robotsOpen ? "缩小" : "展开"}</button></div>
+      {robotsOpen && <div className="robot-management">{robots.map((robot, index) => <div className="robot-upgrade" key={index}><div><strong>机器人 {index + 1}</strong><span>效率 {Math.round(robot.efficiency * 100)}% · 间隔 {robot.intervalSeconds.toFixed(1)}s</span></div><fieldset className="robot-duties"><legend>分配职责</legend>{([['rest','送去休息'],['work','送去工作'],['wake','唤醒摸鱼']] as [SchedulerDuty,string][]).map(([duty, label]) => <label key={duty}><input type="checkbox" checked={robot.duties[duty]} onChange={() => onToggleDuty(index, duty)} /><span>{label}</span></label>)}</fieldset><button disabled={coins < 100 || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX} onClick={() => onUpgradeEfficiency(index)}>{robot.efficiency >= SCHEDULER_EFFICIENCY_MAX ? "效率已满" : `效率 +${Math.round(SCHEDULER_EFFICIENCY_STEP * 100)}%`}{robot.efficiency < SCHEDULER_EFFICIENCY_MAX && <small>100金币</small>}</button><button disabled={coins < 100 || robot.intervalSeconds <= .1} onClick={() => onUpgradeInterval(index)}>间隔 −0.1s<small>100金币</small></button></div>)}</div>}
     </section>}
     <section className={`manager-section plot-manager-section ${plotsOpen ? "is-open" : ""}`}>
       <div className="manager-head"><div><h2>地块管理</h2><p>{plots.filter((plot) => plot.enabled !== false).length} 块启用 · {plots.length} 块地块</p></div><button className="manager-toggle" onClick={() => onToggle("plots")} aria-label={plotsOpen ? "缩小地块管理" : "展开地块管理"}>{plotsOpen ? "缩小" : "展开"}</button></div>
@@ -1759,7 +1875,7 @@ function AutoSchedulerSupplyRow({ coins, onBuy }: { coins: number; onBuy: () => 
   return <ShopRow title="自动补充调度" icon="clock" description="时间低于 180 秒时，自动补充 180 秒" meta="每次花费 300 金币" price={5000} disabled={coins < 5000} onClick={onBuy} />;
 }
 
-function ProductSaleRow({ name, stock, price, onSell }: { name: string; stock: number; price: number; onSell: (amount: number) => void }) {
+function ProductSaleRow({ name, stock, price, onSell, infiniteResources = false }: { name: string; stock: number; price: number; onSell: (amount: number) => void; infiniteResources?: boolean }) {
   const [requestedAmount, setRequestedAmount] = useState<number | "">(10);
   const pointerSliding = useRef(false);
   const available = Math.max(0, Math.floor(stock));
@@ -1773,7 +1889,7 @@ function ProductSaleRow({ name, stock, price, onSell }: { name: string; stock: n
     return Math.abs(nearest - quantity) <= available * .02 ? nearest : quantity;
   };
   return <section className="product-sale-row" aria-label={`${name}出售`}>
-    <div className="product-sale-heading"><strong>{name}</strong><span>库存 {format(available)}</span></div>
+    <div className="product-sale-heading"><strong>{name}</strong><span>库存 {infiniteResources ? "∞" : format(available)}</span></div>
     <div className="product-sale-controls">
       <div className="product-sale-slider">
         {available >= 4 && <div className="product-sale-snap-marks" aria-hidden="true">{[25, 50, 75].map((percent) => <i key={percent} style={{ left: `${percent}%` }} />)}</div>}

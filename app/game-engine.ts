@@ -61,6 +61,9 @@ export type SchedulerRobotState = {
   duties: { rest: boolean; work: boolean; wake: boolean };
 };
 
+export const SCHEDULER_EFFICIENCY_STEP = .02;
+export const SCHEDULER_EFFICIENCY_MAX = 1.5;
+
 export type SchedulerDuty = keyof SchedulerRobotState["duties"];
 
 export type ProcessPlotState = {
@@ -82,10 +85,17 @@ export type OrderState = {
   synthesized: { kind: "screws" | "rebar"; amount: number };
   reward: "coins" | "special";
 };
+export type HolyLightEffect = {
+  id: string;
+  x: number;
+  y: number;
+  remaining: number;
+};
+
 export type TimedEffectsState = {
   canOpener: number;
   smartLeader: number;
-  holyLight: { x: number; y: number; remaining: number } | null;
+  holyLight: HolyLightEffect[];
 };
 
 export type GameState = {
@@ -261,7 +271,7 @@ export function createInitialState(x: number, y: number): GameState {
     orderElapsed: 0,
     orderSerial: 0,
     research: { synthesis: 0, orders: 0 },
-    effects: { canOpener: 0, smartLeader: 0, holyLight: null },
+    effects: { canOpener: 0, smartLeader: 0, holyLight: [] },
     plotPurchases: { gather: 0, process: 0, synthesis: 0, living: 0 },
   };
 }
@@ -482,20 +492,24 @@ export function useSpecialItem(state: GameState, id: Exclude<SpecialItemId, "hol
 
 export function placeHolyLight(state: GameState, x: number, y: number): GameState {
   if (state.inventory.specials.holyLight <= 0) return state;
+  const existingIds = new Set(state.effects.holyLight.map((light) => light.id));
+  let serial = state.effects.holyLight.length + 1;
+  while (existingIds.has(`holy-light-${serial}`)) serial += 1;
   return {
     ...state,
     inventory: { ...state.inventory, specials: { ...state.inventory.specials, holyLight: state.inventory.specials.holyLight - 1 } },
-    effects: { ...state.effects, holyLight: { x, y, remaining: (state.effects.holyLight?.remaining ?? 0) + 60 } },
+    effects: { ...state.effects, holyLight: [...state.effects.holyLight, { id: `holy-light-${serial}`, x, y, remaining: 60 }] },
   };
 }
 
 export function upgradeSchedulerEfficiency(state: GameState, robotIndex: number): GameState {
-  if (state.coins < 100 || !state.schedulerRobots[robotIndex]) return state;
+  const robot = state.schedulerRobots[robotIndex];
+  if (state.coins < 100 || !robot || robot.efficiency >= SCHEDULER_EFFICIENCY_MAX) return state;
   return {
     ...state,
     coins: state.coins - 100,
     schedulerRobots: state.schedulerRobots.map((robot, index) => index === robotIndex
-      ? { ...robot, efficiency: Math.round((robot.efficiency + .01) * 100) / 100 }
+      ? { ...robot, efficiency: Math.min(SCHEDULER_EFFICIENCY_MAX, Math.round((robot.efficiency + SCHEDULER_EFFICIENCY_STEP) * 100) / 100) }
       : robot),
   };
 }
@@ -527,6 +541,7 @@ export function chooseAutoDispatch(
   busyWorkerIds: string[] = [],
   reservedTargetIds: string[] = [],
   duties: SchedulerRobotState["duties"] = { rest: true, work: true, wake: true },
+  dutyOrder: readonly SchedulerDuty[] = ["rest", "work", "wake"],
 ): { workerId: string; targetId: string; action: "rest" | "work" | "wake" | "evacuate" } | null {
   const busy = new Set([...busyWorkerIds, ...state.workers.filter((worker) => worker.status === "dragging").map((worker) => worker.id)]);
   const capacity = (plot: PlotState) => Math.floor(plot.cols * plot.rows / 4);
@@ -574,32 +589,38 @@ export function chooseAutoDispatch(
     (!worker.zoneId || plotsById.get(worker.zoneId)?.type !== "living")
   ) : undefined;
 
-  if (exhausted && livingPlots.length) {
-    const target = balancedLivingPlot();
-    return { workerId: exhausted.id, targetId: target.id, action: "rest" };
+  // The shared robot queue puts recently assigned duties last. Skip duties with
+  // no eligible job without changing the order of other waiting duties.
+  for (const duty of dutyOrder) {
+    if (!duties[duty]) continue;
+    if (duty === "rest" && exhausted) {
+      const target = balancedLivingPlot();
+      if (target) return { workerId: exhausted.id, targetId: target.id, action: "rest" };
+
+      // Make room for recovery when every living slot is occupied or reserved.
+      if (duties.work) {
+        const candidate = state.workers
+          .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living")
+          .sort((a, b) => b.mood - a.mood)[0];
+        const workTarget = balancedWorkPlot();
+        if (candidate && workTarget) return { workerId: candidate.id, targetId: workTarget.id, action: "work" };
+      }
+    }
+    if (duty === "work") {
+      const ready = state.workers.find((worker) =>
+        !busy.has(worker.id) &&
+        worker.status === "ready" &&
+        Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living"
+      );
+      const target = balancedWorkPlot();
+      if (ready && target) return { workerId: ready.id, targetId: target.id, action: "work" };
+    }
+    if (duty === "wake") {
+      const slacking = state.workers.find((worker) => !busy.has(worker.id) && worker.status === "slacking" && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.enabled !== false);
+      if (slacking?.zoneId) return { workerId: slacking.id, targetId: slacking.zoneId, action: "wake" };
+    }
   }
-
-  if (exhausted && !livingPlots.length && duties.work) {
-    const candidate = state.workers
-      .filter((worker) => !busy.has(worker.id) && worker.mood > 0 && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living")
-      .sort((a, b) => b.mood - a.mood)[0];
-    const target = balancedWorkPlot();
-    if (candidate && target) return { workerId: candidate.id, targetId: target.id, action: "work" };
-  }
-
-
-  if (duties.wake) {
-    const slacking = state.workers.find((worker) => !busy.has(worker.id) && worker.status === "slacking" && Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.enabled !== false);
-    if (slacking?.zoneId) return { workerId: slacking.id, targetId: slacking.zoneId, action: "wake" };
-  }
-
-  const ready = duties.work ? state.workers.find((worker) =>
-    !busy.has(worker.id) &&
-    worker.status === "ready" &&
-    Boolean(worker.zoneId) && plotsById.get(worker.zoneId!)?.type === "living"
-  ) : undefined;
-  const target = balancedWorkPlot();
-  return ready && target ? { workerId: ready.id, targetId: target.id, action: "work" } : null;
+  return null;
 }
 
 export function sellProducts(
@@ -726,9 +747,10 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const effects: TimedEffectsState = {
     canOpener: Math.max(0, state.effects.canOpener - dt),
     smartLeader: Math.max(0, state.effects.smartLeader - dt),
-    holyLight: state.effects.holyLight ? { ...state.effects.holyLight, remaining: state.effects.holyLight.remaining - dt } : null,
+    holyLight: state.effects.holyLight
+      .map((light) => ({ ...light, remaining: light.remaining - dt }))
+      .filter((light) => light.remaining > 0),
   };
-  if (effects.holyLight && effects.holyLight.remaining <= 0) effects.holyLight = null;
   const processPlots = Object.fromEntries(Object.entries(state.processPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch } }]));
   const synthesisPlots = Object.fromEntries(Object.entries(state.synthesisPlots).map(([id, value]) => [id, { ...value, batch: { ...value.batch, reserved: { ...value.batch.reserved } } }]));
   const plots = state.plots;
@@ -737,7 +759,7 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
   const plotById = new Map(plots.map((plot) => [plot.id, plot]));
   const zoneTypes = new Map(plots.map((plot) => [plot.id, plot.type]));
   const workZones: ZoneType[] = ["gather", "process", "synthesis"];
-  const holyPlot = (plot: PlotState) => Boolean(effects.holyLight && circleHitsPlot(effects.holyLight.x, effects.holyLight.y, 8, plot));
+  const holyPlot = (plot: PlotState) => effects.holyLight.some((light) => circleHitsPlot(light.x, light.y, 8, plot));
   const guarded = guardedPlotIds(workers);
   const productionMultiplier = (plot: PlotState, holy: boolean) => 1 + Number(holy) + Number(guarded.has(plot.id));
   for (const worker of workers) {
@@ -912,8 +934,11 @@ export function stepGame(state: GameState, seconds: number, random = Math.random
 export function parseSavedState(value: string | null): GameState | null {
   if (!value) return null;
   try {
-    const parsed = JSON.parse(value) as Omit<Partial<GameState>, "version" | "workers"> & {
+    const parsed = JSON.parse(value) as Omit<Partial<GameState>, "version" | "workers" | "effects"> & {
       version?: number;
+      effects?: Omit<Partial<TimedEffectsState>, "holyLight"> & {
+        holyLight?: HolyLightEffect[] | Omit<HolyLightEffect, "id"> | null;
+      };
       workers?: (Omit<WorkerState, "status"> & {
         status: WorkerStatus | "unconscious" | "recovering";
         recoveryRemaining?: number;
@@ -946,6 +971,18 @@ export function parseSavedState(value: string | null): GameState | null {
     if (parsed.workers.some((worker) => worker.lazyCheckInterval !== undefined && (
       !Number.isFinite(worker.lazyCheckInterval) || worker.lazyCheckInterval < 18 || worker.lazyCheckInterval > 22
     ))) return null;
+    // Earlier saves stored one circle (or null); keep its position and timer.
+    const savedHolyLight = parsed.effects?.holyLight;
+    const holyLight: HolyLightEffect[] = savedHolyLight == null ? []
+      : Array.isArray(savedHolyLight) ? savedHolyLight
+      : [{ ...savedHolyLight, id: "holy-light-legacy" }];
+    const holyLightIds = new Set<string>();
+    for (const light of holyLight) {
+      if (!light || typeof light.id !== "string" || !light.id.trim() || holyLightIds.has(light.id)
+        || !Number.isFinite(light.x) || !Number.isFinite(light.y)
+        || !Number.isFinite(light.remaining) || light.remaining < 0) return null;
+      holyLightIds.add(light.id);
+    }
     const rawPlots = Array.isArray(parsed.plots) && parsed.plots.length
       ? parsed.plots
       : INITIAL_PLOTS.map((plot) => ({ ...plot }));
@@ -1009,7 +1046,7 @@ export function parseSavedState(value: string | null): GameState | null {
     const schedulerRobots = Array.from({ length: schedulerBots }, (_, index) => {
       const saved = Array.isArray(parsed.schedulerRobots) ? parsed.schedulerRobots[index] : null;
       return {
-        efficiency: saved && Number.isFinite(saved.efficiency) ? Math.max(1, saved.efficiency) : 1,
+        efficiency: saved && Number.isFinite(saved.efficiency) ? clamp(saved.efficiency, 1, SCHEDULER_EFFICIENCY_MAX) : 1,
         intervalSeconds: saved && Number.isFinite(saved.intervalSeconds) ? clamp(saved.intervalSeconds, .1, 3) : 3,
         duties: {
           rest: saved?.duties?.rest ?? true,
@@ -1086,7 +1123,7 @@ export function parseSavedState(value: string | null): GameState | null {
       effects: {
         canOpener: Math.max(0, parsed.effects?.canOpener ?? parsed.canOpenerSeconds ?? 0),
         smartLeader: Math.max(0, parsed.effects?.smartLeader ?? 0),
-        holyLight: parsed.effects?.holyLight ?? null,
+        holyLight,
       },
       plotPurchases: parsed.plotPurchases ?? {
         gather: Math.max(0, plots.filter((plot) => plot.type === "gather").length - 1),
